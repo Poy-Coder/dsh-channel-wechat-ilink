@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "WeChat channel",
-    "description": "Connects WeChat (ClawBot / iLink) to a DSH session: staged plain-text answers, a typing indicator plus progress notes, and media in both directions. Run scripts/wechat-login.mjs to scan the QR code; the token lands in ~/.dsh/wechat-channel.json."
+    "description": "Connects WeChat (ClawBot / iLink) to a DSH session: one complete plain-text message per turn (split only when very long), a typing indicator plus progress notes, and media in both directions. Run scripts/wechat-login.mjs to scan the QR code; the token lands in ~/.dsh/wechat-channel.json."
   }
 }

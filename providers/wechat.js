@@ -13,8 +13,9 @@
  *     padding, so decryption runs with `setAutoPadding(false)`
  *
  * There is no editable message and no card, so `card.*` is implemented on top of
- * `text-stream.js`: one turn becomes a sequence of plain messages (progress,
- * staged answer, final flush).
+ * `text-stream.js`: a turn is delivered as ONE plain-text message (progress notes
+ * while it runs, then the whole answer), and only an answer over the size cap is
+ * continued in a second message.
  */
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto'
