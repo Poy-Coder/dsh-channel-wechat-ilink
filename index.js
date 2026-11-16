@@ -2178,6 +2178,26 @@ function persistSeenEvents(config, seen) {
   return writeChannelState(config, { seenEvents: [...seen].slice(-SEEN_EVENTS_LIMIT) })
 }
 
+/**
+ * Bind the channel owner from the login, not from the first message.
+ *
+ * An empty `allowedUsers` used to mean "whoever writes first owns the channel",
+ * which leaves a window where a stranger can take it. Providers that know who
+ * logged in (WeChat stores the scanning user id with the bot token) hand it over
+ * here, so the owner is fixed before the first message arrives.
+ */
+function bindOwnerFromCredentials(config) {
+  try {
+    const state = readChannelState(config)
+    if (String(state.owner?.openId ?? '').trim()) return
+    const settings = provider()?.settings?.()
+    const ownerId = String(settings?.userId ?? '').trim()
+    if (!ownerId) return
+    writeChannelState(config, { owner: { openId: ownerId, at: Date.now(), source: 'login' } })
+    logInbound(config, { event: 'inbound', result: 'owner-bound', senderId: ownerId, source: 'login' })
+  } catch { /* binding is best effort: the first-message path still covers it */ }
+}
+
 function writeChannelState(config, patch) {
   try {
     const next = { ...readChannelState(config), ...patch, updatedAt: Date.now() }
@@ -3646,6 +3666,7 @@ function startInbound(ctx, config) {
       // Dedupe survives restarts: a reconnecting long connection can redeliver
       // an event the previous process already handled.
       for (const eventId of loadSeenEvents(config)) seen.add(eventId)
+      bindOwnerFromCredentials(config)
       channelRuntime = { ctx: scoped, config }
       // The active session may already be live from an earlier message; its
       // policy must match the channel's preset even before the next inbound one,

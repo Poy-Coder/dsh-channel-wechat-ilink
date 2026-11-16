@@ -14,10 +14,18 @@
   name: "dsh-channel-wechat-ilink"
   config:
     provider: wechat
-    inboundEnabled: true
+    inboundEnabled: false   # 默认关；开启前先确认下面三个安全项
     sessionMode: create
     workspacePath: ""   # 空 = <非系统盘>/dsh/wechat
 ```
+
+### 开启入站前先看这三个默认值
+
+| 配置 | 默认 | 含义 |
+|---|---|---|
+| `inboundEnabled` | `false` | 打开后，能给它发消息的人就能驱动本地 Agent |
+| `allowedUsers` | `[]` | 空不是"谁都可以"：扫码登录的那个微信号会**自动绑定**为 owner，其他人被拒；要加人再显式列出 |
+| `permissionPreset` / `applyPermissionPreset` | `danger-full-access` / `true` | 无人值守没人能点审批，所以通道工作区里的会话切到这个预设；嫌大就改 `workspace-write` 或关掉 apply |
 
 3. **重启 DSH**（插件在启动时加载，没有热更新）。
 

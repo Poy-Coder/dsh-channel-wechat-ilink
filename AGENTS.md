@@ -10,8 +10,9 @@ dsh plugin add dsh-channel-wechat-ilink
 ```
 
 The row is inserted by the bundle patch and defaults to `provider: wechat`.
-Inbound defaults to off; enabling it lets anyone allowed in the chat drive the
-local agent, so ask first.
+Inbound defaults to off; enabling it lets allowed senders drive the local agent,
+so ask first. With an empty `allowedUsers`, the account that scanned the QR is
+bound as the owner automatically, and every other sender is refused.
 
 ## 2. Log in
 

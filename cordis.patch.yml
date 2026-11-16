@@ -1,6 +1,14 @@
 # Bundle patch: inserts the channel row into the profile that installs this
 # package. Everything here is a default; a profile's cordis.patch.yml overrides
 # it (a matching override replaces the complete `config`).
+#
+# Three defaults are deliberately conservative — read them before enabling:
+#   inboundEnabled: false          the channel does not listen until you opt in
+#   allowedUsers: []               empty = the logged-in account owns it (WeChat)
+#                                  / the first sender binds it (Feishu)
+#   permissionPreset + apply...    unattended turns cannot answer approvals, so
+#                                  sessions in the channel workspace switch to the
+#                                  preset below once inbound is on
 - insert:
     - id: wechat-channel
       name: 'dsh-channel-wechat-ilink'
@@ -9,15 +17,19 @@
         provider: wechat
         # Register the tools at all.
         enabled: true
-        # Long connection + inbound delivery. On by default: this is a channel
-        # plugin, so "installs and starts receiving" is the expected behaviour.
-        # Set false when the bot should only send (wechat_send_message/file).
-        inboundEnabled: true
+        # Long connection + inbound delivery. OFF by default: anyone inside the
+        # app's visibility scope can drive the local agent once this is on, so
+        # enabling it is an explicit decision (set it to true after you have an
+        # allowlist and understand the permission preset below).
+        # Leave false when the bot should only send (wechat_send_message/file).
+        inboundEnabled: false
         # Session inbound messages go to; `create` makes it when missing, which
         # is what a fresh install needs: the first message opens the session.
         sessionId: ''
         sessionMode: create
-        # Sender allowlist (open_id); empty accepts anyone.
+        # Sender allowlist (open_id). Empty is not "open to everyone": the first
+        # sender binds the channel and later senders are refused. Fill it in to
+        # choose the owner up front instead of letting a message choose it.
         allowedUsers: []
         # Workspace that owns channel sessions; '' uses <home>/dsh/wechat.
         workspacePath: ''
@@ -29,8 +41,9 @@
         # conversation can be followed from either surface.
         mirrorUserMessages: true
         # Unattended turns have nobody to answer approvals, so sessions in the
-        # workspace switch to this preset (set applyPermissionPreset: false to
-        # keep each session's own policy).
+        # workspace switch to this preset. danger-full-access means "the bot can
+        # do anything on this machine when you chat with it"; use workspace-write
+        # or set applyPermissionPreset: false if that is too much.
         permissionPreset: danger-full-access
         applyPermissionPreset: true
         # Credentials stay out of this file: run scripts/wechat-login.mjs, which

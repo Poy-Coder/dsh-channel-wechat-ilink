@@ -2,8 +2,8 @@
  * WeChat (iLink / 微信 ClawBot) transport adapter for the DSH channel framework.
  *
  * Protocol facts are taken from Tencent's official client
- * (`@tencent-weixin/openclaw-weixin`, MIT) and verified live by
- * `scripts/wechat-probe.mjs`:
+ * (`@tencent-weixin/openclaw-weixin`, MIT) and verified live with
+ * `scripts/wechat-e2e.mjs`:
  *
  *   - login:  QR scan → `bot_token` + `ilink_bot_id` (+ `baseurl`)
  *   - inbound: long-poll `ilink/bot/getupdates` with a `get_updates_buf` cursor
