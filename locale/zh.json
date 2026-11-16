@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "微信通道",
+    "description": "把微信（ClawBot / iLink）接到一个 DSH 会话：回答按段落分条发送，长任务先显示「正在输入」再补进度，图片和文件双向收发，通道独占一个工作区。用 scripts/wechat-login.mjs 扫码登录，凭据写到 ~/.dsh/wechat-channel.json。",
+    "detail": "docs/DETAIL.zh.md"
+  }
+}

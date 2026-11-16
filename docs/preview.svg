@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300" role="img" aria-label="An IM chat on the left exchanging messages and files with a DSH session card on the right">
+  <rect width="640" height="300" rx="18" fill="#0f1218"/>
+
+  <!-- Phone / chat surface -->
+  <rect x="48" y="42" width="220" height="216" rx="26" fill="#1a2030" stroke="#2b3446" stroke-width="2"/>
+  <rect x="64" y="66" width="188" height="30" rx="15" fill="#2b3446"/>
+  <rect x="80" y="78" width="90" height="7" rx="3.5" fill="#8fa3c8"/>
+
+  <!-- Incoming user bubble -->
+  <rect x="64" y="112" width="150" height="26" rx="13" fill="#2f6fd0"/>
+  <rect x="78" y="122" width="96" height="6" rx="3" fill="#dbe7ff"/>
+
+  <!-- Outgoing card bubble with answer lines -->
+  <rect x="64" y="150" width="188" height="72" rx="14" fill="#f2f4f8"/>
+  <rect x="78" y="164" width="150" height="6" rx="3" fill="#1f2430" opacity="0.75"/>
+  <rect x="78" y="178" width="132" height="6" rx="3" fill="#1f2430" opacity="0.55"/>
+  <rect x="78" y="192" width="112" height="6" rx="3" fill="#1f2430" opacity="0.35"/>
+  <rect x="78" y="206" width="64" height="6" rx="3" fill="#3b82f6"/>
+
+  <!-- Attachment chip -->
+  <rect x="64" y="232" width="120" height="20" rx="10" fill="#243046" stroke="#3b82f6" stroke-width="1.5"/>
+  <circle cx="78" cy="242" r="5" fill="#3b82f6"/>
+  <rect x="90" y="239" width="78" height="6" rx="3" fill="#9db6e0"/>
+
+  <!-- Flow arrows -->
+  <path d="M292 150h56" stroke="#3b82f6" stroke-width="4" stroke-linecap="round"/>
+  <path d="M338 138l14 12-14 12" fill="none" stroke="#3b82f6" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M348 190h-56" stroke="#6b7c99" stroke-width="4" stroke-linecap="round"/>
+  <path d="M302 178l-14 12 14 12" fill="none" stroke="#6b7c99" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- DSH session card -->
+  <rect x="372" y="60" width="220" height="180" rx="18" fill="#f7f9fc" stroke="#d4dcea" stroke-width="2"/>
+  <rect x="372" y="60" width="220" height="34" rx="18" fill="#e4ebf7"/>
+  <rect x="390" y="72" width="86" height="9" rx="4.5" fill="#33507f"/>
+  <rect x="392" y="112" width="180" height="8" rx="4" fill="#33507f" opacity="0.65"/>
+  <rect x="392" y="130" width="150" height="8" rx="4" fill="#33507f" opacity="0.45"/>
+  <rect x="392" y="148" width="168" height="8" rx="4" fill="#33507f" opacity="0.3"/>
+  <rect x="392" y="176" width="72" height="20" rx="10" fill="#3b82f6"/>
+  <rect x="404" y="184" width="48" height="5" rx="2.5" fill="#e8f0ff"/>
+  <rect x="476" y="176" width="72" height="20" rx="10" fill="#dce7fb"/>
+  <rect x="488" y="184" width="48" height="5" rx="2.5" fill="#5c7bb5"/>
+</svg>

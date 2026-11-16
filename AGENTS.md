@@ -1,0 +1,48 @@
+# AGENTS.md — installing the WeChat channel
+
+This bundle carries the same channel framework as `dsh-channel-feishu`, but the
+transport is WeChat (iLink / ClawBot). The steps that differ:
+
+## 1. Install
+
+```bash
+dsh plugin add dsh-channel-wechat-ilink
+```
+
+The row is inserted by the bundle patch and defaults to `provider: wechat`.
+Inbound defaults to off; enabling it lets anyone allowed in the chat drive the
+local agent, so ask first.
+
+## 2. Log in
+
+```bash
+node scripts/wechat-login.mjs --qr
+```
+
+Scan the rendered QR with WeChat. The token lands in `~/.dsh/wechat-channel.json`
+(0600). Never paste it into chat, a commit, or the patch file.
+
+## 3. Verify
+
+1. `wechat_channel_status` → `configured: true`, `tokenOk: true`,
+   `poll.lastOkAt` moving.
+2. Send one WeChat message; the answer arrives in parts and a workspace row
+   appears in the GUI.
+3. `node scripts/wechat-e2e.mjs` replies "第 1/2 段" / "第 2/2 段".
+
+## 4. Restart DSH
+
+Plugin code loads at startup; a `dsh plugin add` without a restart keeps the old
+build running — the classic "I updated it and nothing changed".
+
+## Stability notes (do not mis-diagnose)
+
+- **No history API.** iLink exposes only `getupdates` long polling. There is no
+  way to pull "what was said while we were down"; two timers cover it instead:
+  a poll that does not complete within ~2 minutes is aborted and rebuilt
+  (`channel rebuild`), and a cursor idle for 20 minutes is reset once
+  (`channel cursor-reset`, messages older than 30 minutes are skipped).
+- **One bot per account.** A second process polling the same bot token competes
+  for `getupdates`; use one DSH per WeChat bot.
+- **`errcode -14` means back off.** The plugin pauses all requests for an hour
+  rather than hammering the API; re-login with the QR script if it persists.

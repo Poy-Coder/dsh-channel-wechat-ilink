@@ -1,0 +1,58 @@
+{
+  "name": "dsh-channel-wechat-ilink",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WeChat (iLink / ClawBot) channel for DeepSeek Harness: staged plain-text answers, typing plus progress, media both ways, one workspace per channel.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Poy-Coder/dsh-channel-wechat-ilink.git"
+  },
+  "homepage": "https://github.com/Poy-Coder/dsh-channel-wechat-ilink#readme",
+  "bugs": {
+    "url": "https://github.com/Poy-Coder/dsh-channel-wechat-ilink/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "wechat",
+    "weixin",
+    "ilink",
+    "clawbot",
+    "channel",
+    "plugin"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./providers/*": "./providers/*",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "icon": "icon.svg",
+  "engines": {
+    "node": ">=20.18.1",
+    "dsh": ">=0.2.2-rc.3 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "providers",
+    "cordis.patch.yml",
+    "README.md",
+    "AGENTS.md",
+    "locale",
+    "docs",
+    "scripts",
+    "icon.svg",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "@larksuiteoapi/node-sdk": "^1.74.0"
+  }
+}

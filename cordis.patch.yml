@@ -1,0 +1,38 @@
+# Bundle patch: inserts the channel row into the profile that installs this
+# package. Everything here is a default; a profile's cordis.patch.yml overrides
+# it (a matching override replaces the complete `config`).
+- insert:
+    - id: wechat-channel
+      name: 'dsh-channel-wechat-ilink'
+      config:
+        # Transport adapter: providers/registry.js owns the list.
+        provider: wechat
+        # Register the tools at all.
+        enabled: true
+        # Long connection + inbound delivery. On by default: this is a channel
+        # plugin, so "installs and starts receiving" is the expected behaviour.
+        # Set false when the bot should only send (wechat_send_message/file).
+        inboundEnabled: true
+        # Session inbound messages go to; `create` makes it when missing, which
+        # is what a fresh install needs: the first message opens the session.
+        sessionId: ''
+        sessionMode: create
+        # Sender allowlist (open_id); empty accepts anyone.
+        allowedUsers: []
+        # Workspace that owns channel sessions; '' uses <home>/dsh/wechat.
+        workspacePath: ''
+        # Answer delivery: stream into a card, and deliver each turn's answer
+        # back to the originating chat without the model calling a tool.
+        streamingCards: true
+        autoReply: true
+        # Messages typed on the desktop GUI are mirrored into the chat, so one
+        # conversation can be followed from either surface.
+        mirrorUserMessages: true
+        # Unattended turns have nobody to answer approvals, so sessions in the
+        # workspace switch to this preset (set applyPermissionPreset: false to
+        # keep each session's own policy).
+        permissionPreset: danger-full-access
+        applyPermissionPreset: true
+        # Credentials stay out of this file: run scripts/wechat-login.mjs, which
+        # writes ~/.dsh/wechat-channel.json after the phone scans the QR code.
+        baseUrl: ""
