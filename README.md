@@ -4,9 +4,9 @@
 
 > 注意包名：npm 上的 `dsh-channel-wechat` 是**另一个作者**的插件（卡片转发路线）。这个包叫 `dsh-channel-wechat-ilink`，走纯文本路线。
 
-**配套**：
+**配套（建议一并安装）**：
 
-- [`dsh-im-indicator`](https://github.com/Poy-Coder/dsh-im-indicator) —— 在 DSH 左侧会话列表标出「哪条会话正被通道驱动」，一行胶囊 + 一个状态点，零依赖 7 kB；
+- [`dsh-im-indicator`](https://github.com/Poy-Coder/dsh-im-indicator) —— **推荐装**：在 DSH 左侧会话列表直接看出「哪条会话正被微信驱动、它现在在回答还是已完成」，一行胶囊 + 一个状态点，零依赖约 7 kB；
 - [`dsh-channel-feishu`](https://github.com/Poy-Coder/dsh-channel-feishu) —— 同一套框架的飞书通道，可与微信同时在线。
 
 ## 安装
