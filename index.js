@@ -101,6 +101,8 @@ export const Config = z.object({
   defaultChatId: z.string().default('').description('Destination used when a tool call omits receiveId.'),
   logFile: z.string().default('').description('Inbound diagnostics log path.'),
   readyNotice: z.boolean().default(true).description('Send one "channel ready" message to the default chat after the inbound long connection comes up.'),
+  readyNoticeCooldownHours: z.number().default(12)
+    .description('Suppress the ready message when the same plugin version already announced itself within this many hours (restarts are frequent during setup; 0 always sends).'),
   problemNotices: z.boolean().default(true).description('Push a Feishu note explaining the cause when a turn fails, a message cannot be delivered, or the long connection stays down.'),
   mirrorUserMessages: z.boolean().default(true).description('Post messages typed outside Feishu (desktop GUI) into the owning chat, as "来自桌面端：<text>".'),
   logLevel: z.union([z.const('debug'), z.const('info'), z.const('warn'), z.const('error')])
@@ -1908,6 +1910,22 @@ async function announceReady(config) {
   try {
     const chatId = String(provider().settings().defaultChatId ?? '').trim()
     if (!chatId) return
+    // DSH restarts are frequent during setup, and every restart used to push
+    // another identical "channel ready" message into the chat. Announce once per
+    // plugin version per cooldown window; a version change still announces.
+    const cooldownHours = Number(config?.readyNoticeCooldownHours ?? 12)
+    const cooldownMs = Number.isFinite(cooldownHours) && cooldownHours > 0 ? cooldownHours * 3_600_000 : 0
+    const version = String(PLUGIN_VERSION || '')
+    const state = readChannelState(config)
+    const lastAt = Number(state?.readyNoticeAt ?? 0)
+    const lastVersion = String(state?.readyNoticeVersion ?? '')
+    if (cooldownMs > 0 && lastAt > 0 && lastVersion === version && Date.now() - lastAt < cooldownMs) {
+      logInbound(config, {
+        event: 'channel', result: 'ready-notice-skipped',
+        reason: 'cooldown', minutesAgo: Math.round((Date.now() - lastAt) / 60_000),
+      })
+      return
+    }
     // Name the session inbound messages actually land in. The row config keeps
     // pinning its own id, so after `/new` (or after a config reload) printing that
     // pin reads as if the channel had switched to — or created — another session.
@@ -1918,6 +1936,7 @@ async function announceReady(config) {
         + ` · DSH ${dshRuntimeVersion() || '(unknown)'}\n`
         + `入站长连接正常，当前会话=${session || '按消息新建'}`,
     })
+    writeChannelState(config, { readyNoticeAt: Date.now(), readyNoticeVersion: version })
     logInbound(config, { event: 'channel', result: 'ready-notice', chatId })
   } catch (error) {
     logInbound(config, { event: 'channel', result: 'ready-notice-failed', reason: errorText(error) })
