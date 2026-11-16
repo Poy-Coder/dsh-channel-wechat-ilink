@@ -4,6 +4,11 @@
 
 > 注意包名：npm 上的 `dsh-channel-wechat` 是**另一个作者**的插件（卡片转发路线）。这个包叫 `dsh-channel-wechat-ilink`，走纯文本路线。
 
+**配套**：
+
+- [`dsh-im-indicator`](https://github.com/Poy-Coder/dsh-im-indicator) —— 在 DSH 左侧会话列表标出「哪条会话正被通道驱动」，一行胶囊 + 一个状态点，零依赖 7 kB；
+- [`dsh-channel-feishu`](https://github.com/Poy-Coder/dsh-channel-feishu) —— 同一套框架的飞书通道，可与微信同时在线。
+
 ## 安装
 
 1. 扫码登录并写出凭据：`node scripts/wechat-login.mjs --qr`（二维码直接画在终端，并落一张 PNG；也可发到飞书扫码）。
