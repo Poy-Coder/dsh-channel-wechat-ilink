@@ -1190,12 +1190,12 @@ function appendCotReasoning(run, text) {
 const sendMessageTool = (config) => ({
   name: `${channelProfile(config).toolPrefix}_send_message`,
   description:
-    'Send a plain-text message through the dedicated DSH Feishu bot (飞书). '
-    + 'The channel already delivers the final answer of every Feishu-originated turn back '
+    `Send a plain-text message through the dedicated DSH ${channelProfile(config).label} bot. `
+    + `The channel already delivers the final answer of every ${channelProfile(config).label}-originated turn back `
     + 'automatically, so do NOT call this just to reply in that conversation. Use it to push '
-    + 'something to a DIFFERENT Feishu chat, or when explicit delivery is requested. '
+    + `something to a DIFFERENT ${channelProfile(config).label} chat, or when explicit delivery is requested. `
     + '`text` is required; omit `receiveId` to use the configured defaultChatId. '
-    + 'Returns the Feishu message id.',
+    + `Returns the ${channelProfile(config).label} message id.`,
   parameters: {
     type: 'object',
     properties: {
@@ -1225,10 +1225,11 @@ const sendMessageTool = (config) => ({
       additionalProperties: true,
     },
     render(args, value) {
-      if (!value?.ok) return [{ type: 'text', text: `飞书发送失败: ${value?.error ?? 'unknown error'}` }]
+      const label = channelProfile(config).label
+      if (!value?.ok) return [{ type: 'text', text: `${label}发送失败: ${value?.error ?? 'unknown error'}` }]
       return [{
         type: 'text',
-        text: `已发送到飞书${value.chatId ? ` (chat ${value.chatId})` : ''}: ${args.text}`,
+        text: `已发送到${label}${value.chatId ? ` (chat ${value.chatId})` : ''}: ${args.text}`,
       }]
     },
   },
@@ -1241,7 +1242,7 @@ const sendMessageTool = (config) => ({
 const sendFileTool = (config) => ({
   name: `${channelProfile(config).toolPrefix}_send_file`,
   description:
-    'Upload and send one local file through the Feishu bot: pictures (png/jpg/webp/gif/bmp) go as '
+    `Upload and send one local file through the ${channelProfile(config).label} bot: pictures (png/jpg/webp/gif/bmp) go as `
     + 'image messages, everything else (pdf/docx/xlsx/pptx/zip/mp4/text…) as file messages. '
     + 'Use it to deliver generated documents, screenshots, exports, or logs the user asked for. '
     + '`path` must name an existing file (images ≤ 10 MB, other files ≤ 30 MB).',
@@ -1249,7 +1250,7 @@ const sendFileTool = (config) => ({
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Absolute path of the local file to send.' },
-      name: { type: 'string', description: 'File name to show in Feishu (defaults to the path basename).' },
+      name: { type: 'string', description: `File name to show in ${channelProfile(config).label} (defaults to the path basename).` },
       receiveId: {
         type: 'string',
         description: 'Destination id (chat_id like oc_..., or open_id/user_id/email of the receiver).',
@@ -1277,10 +1278,11 @@ const sendFileTool = (config) => ({
       additionalProperties: true,
     },
     render(_args, value) {
-      if (!value?.ok) return [{ type: 'text', text: `飞书附件发送失败: ${value?.error ?? 'unknown error'}` }]
+      const label = channelProfile(config).label
+      if (!value?.ok) return [{ type: 'text', text: `${label}附件发送失败: ${value?.error ?? 'unknown error'}` }]
       const size = Number(value.bytes ?? 0)
       const human = size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(size / 1024))} KB`
-      return [{ type: 'text', text: `已发送到飞书（${value.kind}）：${value.name} · ${human}` }]
+      return [{ type: 'text', text: `已发送到${label}（${value.kind}）：${value.name} · ${human}` }]
     },
   },
   async execute(args, exec) {
@@ -1308,17 +1310,17 @@ function nextStepsOf(config, result, inbound) {
     steps.push('取 token 失败：核对 appId / appSecret、region（国际版用 lark），确认应用已发布并开通机器人能力')
   }
   if (config?.enabled !== false && config?.inboundEnabled !== true) {
-    steps.push('入站未开启：在 profile 的 cordis.patch.yml 给 feishu-channel 行设 inboundEnabled: true，然后重启 DSH')
+    steps.push(`入站未开启：在 profile 的 cordis.patch.yml 给 ${channelProfile(config ?? {}).fileSlug}-channel 行设 inboundEnabled: true，然后重启 DSH`)
   }
   if (config?.inboundEnabled === true && !inbound?.ready) {
-    steps.push('入站长连接未就绪：确认没有另一个飞书插件用同一个 App 在连接（会互相抢事件），然后重启 DSH')
+    steps.push(`入站长连接未就绪：确认没有另一个${channelProfile(config ?? {}).label}插件用同一个 App 在连接（会互相抢事件），然后重启 DSH`)
   }
   if (!String(result?.defaultChatId ?? '').trim()) {
     steps.push('没有默认会话：把 defaultChatId（oc_ 开头）写进凭据文件，或在行 config 里设置')
   }
   if (!String(currentSessionId(config ?? {}) ?? '').trim()
     && String(config?.sessionMode ?? 'resume').toLowerCase() !== 'create') {
-    steps.push('还没有会话：给 feishu-channel 行设 sessionMode: create，第一条飞书消息会自动开一个会话')
+    steps.push(`还没有会话：给 ${channelProfile(config ?? {}).fileSlug}-channel 行设 sessionMode: create，第一条${channelProfile(config ?? {}).label}消息会自动开一个会话`)
   }
   return steps
 }
@@ -1326,7 +1328,7 @@ function nextStepsOf(config, result, inbound) {
 const statusTool = (config) => ({
   name: `${channelProfile(config).toolPrefix}_channel_status`,
   description:
-    'Report the DSH Feishu channel state: whether app credentials are present, which region and '
+    `Report the DSH ${channelProfile(config).label} channel state: whether app credentials are present, which region and `
     + 'default destination are configured, and whether a tenant access token can be obtained.',
   parameters: { type: 'object', properties: {}, additionalProperties: false },
   output: {
@@ -2754,7 +2756,7 @@ export async function handleInboundEvent(ctx, config, data, seen) {
       void sendChannelText(
         config,
         inbound.chatId,
-        '这个飞书通道已绑定给其他用户使用。如需更换，请在 DSH 配置里显式设置 allowedUsers。',
+        `这个${channelProfile(config).label}通道已绑定给其他用户使用。如需更换，请在 DSH 配置里显式设置 allowedUsers。`,
       ).catch(() => {})
       markSeen()
       return
@@ -2929,7 +2931,7 @@ export async function handleInboundEvent(ctx, config, data, seen) {
   }
   if (resolved.created) await attachToFeishuWorkspace(ctx, config, sessionId)
 
-  warnTo(ctx, `delivered inbound Feishu message from ${senderId} to session ${sessionId} (${resolved.via})`)
+  warnTo(ctx, `delivered inbound ${channelProfile(config).label} message from ${senderId} to session ${sessionId} (${resolved.via})`)
   log({ event: 'inbound', result: 'delivered', senderId, chatId, sessionId, via: resolved.via })
   return true
 }
