@@ -1834,6 +1834,26 @@ const problemNoticedAt = new Map()
  * the cause and where to look; the caller still gets a boolean so it can decide
  * what to do with the card.
  */
+/**
+ * Can this transport start a conversation on its own?
+ *
+ * Feishu can: the bot writes to a chat at any time. iLink cannot: it signs a
+ * `context_token` per inbound message, so a proactive notice before the user ever
+ * wrote fails with `ret=-2 prepare failed`. Providers answer through this optional
+ * hook; the framework then defers the notice to the log instead of reporting an
+ * error on every fresh bind.
+ */
+function proactiveAllowed(chatId) {
+  try {
+    const current = provider()
+    const can = current?.canSendProactive
+    if (typeof can !== 'function') return true
+    return Boolean(can.call(current, chatId))
+  } catch {
+    return true
+  }
+}
+
 async function notifyProblem(config, { key, title, detail, chatId }) {
   if (config?.problemNotices === false) return false
   const now = Date.now()
@@ -1843,6 +1863,10 @@ async function notifyProblem(config, { key, title, detail, chatId }) {
     try { target = String(provider().settings().defaultChatId ?? '').trim() } catch { target = '' }
   }
   if (!target) return false
+  if (!proactiveAllowed(target)) {
+    logInbound(config, { event: 'problem', result: 'deferred', key, reason: 'transport cannot start the chat' })
+    return false
+  }
   problemNoticedAt.set(key, now)
   const lines = [`⚠️ ${channelProfile(config).label}通道：${title}`]
   if (detail) lines.push(String(detail).trim())
@@ -1910,6 +1934,10 @@ async function announceReady(config) {
   try {
     const chatId = String(provider().settings().defaultChatId ?? '').trim()
     if (!chatId) return
+    if (!proactiveAllowed(chatId)) {
+      logInbound(config, { event: 'channel', result: 'ready-notice-deferred', reason: 'no inbound conversation yet' })
+      return
+    }
     // DSH restarts are frequent during setup, and every restart used to push
     // another identical "channel ready" message into the chat. Announce once per
     // plugin version per cooldown window; a version change still announces.
@@ -3937,4 +3965,46 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(sendFileTool(config))
   ctx.tools.register(statusTool(config))
   if (config.inboundEnabled === true) startInbound(ctx, config)
+  else void warnInboundDisabled(config)
+}
+
+/**
+ * The channel is installed, credentials work, but nothing listens.
+ *
+ * From the IM side this reads as "cannot connect", and a silent failure is the
+ * worst outcome: the plugin can still SEND, so spend one message per cooldown
+ * telling the user why nothing arrives (and how to turn it on). It is skipped
+ * when the channel is not configured at all — then there is nothing to say it to.
+ */
+async function warnInboundDisabled(config) {
+  try {
+    if (config?.enabled === false) return
+    const settings = provider()?.settings?.() ?? {}
+    const configured = Boolean(settings.botToken || settings.appId)
+    if (!configured) return
+    const chatId = String(settings.defaultChatId ?? '').trim() || currentSessionId(config)
+    if (!chatId) return
+    if (!proactiveAllowed(chatId)) {
+      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-deferred', reason: 'no inbound conversation yet' })
+      return
+    }
+    if (String(settings.botToken ?? '').trim() === '' && String(settings.appId ?? '').trim() === '') return
+    const cooldownHours = Number(config?.readyNoticeCooldownHours ?? 12)
+    const cooldownMs = Number.isFinite(cooldownHours) && cooldownHours > 0 ? cooldownHours * 3_600_000 : 0
+    const state = readChannelState(config)
+    const lastAt = Number(state?.inboundDisabledNoticeAt ?? 0)
+    if (cooldownMs > 0 && lastAt > 0 && Date.now() - lastAt < cooldownMs) {
+      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-skipped' })
+      return
+    }
+    await provider().sendText({
+      chatId,
+      text: `⚠️ ${channelProfile(config).label}通道已配置，但入站未开启\n`
+        + '消息不会被接收。在 profile 的 cordis.patch.yml 对应行设置 inboundEnabled: true，然后重启 DSH。',
+    })
+    writeChannelState(config, { inboundDisabledNoticeAt: Date.now() })
+    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice', chatId })
+  } catch (error) {
+    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-failed', reason: errorText(error) })
+  }
 }

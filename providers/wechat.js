@@ -623,6 +623,16 @@ export function createWechatProvider(config = {}, deps = {}) {
     sendText,
     sendAttachment,
 
+    /**
+     * iLink signs a `context_token` per inbound message, so a bot can only answer
+     * inside a conversation the user started. Without a stored token a proactive
+     * send fails with `ret=-2 prepare failed`; the framework asks this first and
+     * defers the notice instead of logging an error on every fresh bind.
+     */
+    canSendProactive(chatId) {
+      return Boolean(contextTokenOf(String(chatId ?? '')))
+    },
+
     parseInbound(message) {
       const chatId = String(message?.from_user_id ?? '')
       const messageId = String(message?.message_id ?? '')
@@ -811,6 +821,9 @@ export function createWechatProvider(config = {}, deps = {}) {
       pollHealth.rebuilds = 0
       pollHealth.cursorResets = 0
       let lastMessageAt = Date.now()
+      // A reset only makes sense once per idle window; without this, the very
+      // next poll saw the same idle gap and reset again every iteration.
+      let lastCursorResetAt = 0
       let pollController
       let cursorResetPending = false
       const loop = async () => {
@@ -827,8 +840,11 @@ export function createWechatProvider(config = {}, deps = {}) {
           // cursor is the documented reset; already answered messages are dropped
           // by message-id dedupe, and the age filter keeps a replay from waking
           // up ancient history.
-          if (!cursorResetPending && cursor && Date.now() - lastMessageAt > IDLE_CURSOR_RESET_MS) {
+          if (!cursorResetPending && cursor
+            && Date.now() - lastMessageAt > IDLE_CURSOR_RESET_MS
+            && Date.now() - lastCursorResetAt > IDLE_CURSOR_RESET_MS) {
             cursorResetPending = true
+            lastCursorResetAt = Date.now()
             pollHealth.cursorResets += 1
             log({ event: 'channel', result: 'cursor-reset', reason: `no message for ${Math.round((Date.now() - lastMessageAt) / 60_000)} min` })
           }
