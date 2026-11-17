@@ -1939,7 +1939,7 @@ async function announceReady(config) {
     const chatId = String(provider().settings().defaultChatId ?? '').trim()
     if (!chatId) return
     if (!proactiveAllowed(chatId)) {
-      logInbound(config, { event: 'channel', result: 'ready-notice-deferred', reason: 'no inbound conversation yet' })
+      logInbound(config, { event: 'channel', result: 'ready-notice-deferred', level: 'info', reason: 'no inbound conversation yet' })
       return
     }
     // DSH restarts are frequent during setup, and every restart used to push
@@ -1953,7 +1953,7 @@ async function announceReady(config) {
     const lastVersion = String(state?.readyNoticeVersion ?? '')
     if (cooldownMs > 0 && lastAt > 0 && lastVersion === version && Date.now() - lastAt < cooldownMs) {
       logInbound(config, {
-        event: 'channel', result: 'ready-notice-skipped',
+        event: 'channel', result: 'ready-notice-skipped', level: 'info',
         reason: 'cooldown', minutesAgo: Math.round((Date.now() - lastAt) / 60_000),
       })
       return
@@ -1971,7 +1971,7 @@ async function announceReady(config) {
     writeChannelState(config, { readyNoticeAt: Date.now(), readyNoticeVersion: version })
     logInbound(config, { event: 'channel', result: 'ready-notice', chatId })
   } catch (error) {
-    logInbound(config, { event: 'channel', result: 'ready-notice-failed', reason: errorText(error) })
+    logInbound(config, { event: 'channel', result: 'ready-notice-failed', level: 'warn', reason: errorText(error) })
   }
 }
 
@@ -2227,6 +2227,56 @@ function loadSeenEvents(config) {
 
 function persistSeenEvents(config, seen) {
   return writeChannelState(config, { seenEvents: [...seen].slice(-SEEN_EVENTS_LIMIT) })
+}
+
+/**
+ * Inbound messages whose session could not be resolved yet.
+ *
+ * A resume failure is usually transient — the session is briefly held by another
+ * writer (the GUI opening it, a restart, a second DSH instance). Marking such a
+ * message "seen" drops it for good, because the provider's cursor has already
+ * moved past it. Keep it here and retry from a timer instead; the queue is
+ * persisted so a restart does not lose it either.
+ */
+const PENDING_INBOUND_LIMIT = 20
+const PENDING_INBOUND_TTL_MS = 30 * 60 * 1000
+const PENDING_INBOUND_RETRY_MS = 15_000
+
+/**
+ * Only a busy/locked session is worth retrying. "sessionMode is off", an
+ * unknown preset or a missing session id are configuration answers: retrying
+ * them would just delay the same failure by thirty minutes.
+ */
+function isTransientInboundFailure(reason) {
+  return /lock|busy|writer|conflict|in use|already open|already exists|EAGAIN|EBUSY|held by/i.test(String(reason ?? ''))
+}
+
+function loadPendingInbound(config) {
+  try {
+    const stored = readChannelState(config).pendingInbound
+    return Array.isArray(stored) ? stored.filter((item) => item && Array.isArray(item.keys)) : []
+  } catch {
+    return []
+  }
+}
+
+function savePendingInbound(config, list) {
+  return writeChannelState(config, { pendingInbound: list.slice(-PENDING_INBOUND_LIMIT) })
+}
+
+/** Queue one undelivered message; a redelivery of the same event replaces it. */
+function queuePendingInbound(config, entry) {
+  const list = loadPendingInbound(config)
+    .filter((item) => !item.keys.some((key) => entry.keys.includes(key)))
+  list.push(entry)
+  savePendingInbound(config, list)
+  return list.length
+}
+
+function removePendingInbound(config, keys) {
+  const list = loadPendingInbound(config).filter((item) => !item.keys.some((key) => keys.includes(key)))
+  savePendingInbound(config, list)
+  return list.length
 }
 
 /**
@@ -2864,9 +2914,21 @@ export async function handleInboundEvent(ctx, config, data, seen) {
 
   const resolved = await resolveInboundAgent(ctx, config)
   if (!resolved.agent) {
-    warnTo(ctx, `inbound message dropped for session "${sessionId}": ${resolved.reason}`)
-    log({ event: 'inbound', result: 'dropped', reason: resolved.reason, senderId, chatId, sessionId })
-    markSeen()
+    if (!isTransientInboundFailure(resolved.reason)) {
+      warnTo(ctx, `inbound message dropped for session "${sessionId}": ${resolved.reason}`)
+      log({ event: 'inbound', result: 'dropped', reason: resolved.reason, senderId, chatId, sessionId })
+      markSeen()
+      return
+    }
+    // Do NOT mark it seen: a busy writer (the GUI opened the session, a restart,
+    // a second DSH instance) is transient, and marking it here dropped the
+    // message for good because the provider cursor had already moved past it.
+    const depth = queuePendingInbound(config, {
+      keys: seenKeys, text, chatId, senderId,
+      messageId: inbound.messageId ?? '', sessionId, at: Date.now(), reason: resolved.reason,
+    })
+    warnTo(ctx, `inbound message queued for session "${sessionId}" (${resolved.reason}); retrying`)
+    log({ event: 'inbound', result: 'queued', reason: resolved.reason, senderId, chatId, sessionId, depth })
     return
   }
 
@@ -2907,6 +2969,19 @@ export async function handleInboundEvent(ctx, config, data, seen) {
     }
   } catch (error) {
     const reason = errorText(error)
+    // The followup can fail for the same transient reason: the session's writer
+    // is busy (a turn already running, the GUI writing another message). Queue
+    // it instead of losing it, because the provider cursor already moved on.
+    if (isTransientInboundFailure(reason)) {
+      const depth = queuePendingInbound(config, {
+        keys: seenKeys, text, chatId, senderId,
+        messageId: inbound.messageId ?? '', sessionId, at: Date.now(), reason,
+      })
+      warnTo(ctx, `inbound delivery blocked for session "${sessionId}" (${reason}); retrying`)
+      log({ event: 'inbound', result: 'queued-on-delivery', reason, senderId, chatId, sessionId, depth })
+      if (resolved.created) await attachToFeishuWorkspace(ctx, config, sessionId)
+      return
+    }
     warnTo(ctx, `inbound delivery failed for session "${sessionId}": ${reason}`)
     log({ event: 'inbound', result: 'error', reason, senderId, chatId, sessionId, via: resolved.via })
     // The message never reached the session: without this the chat just looks
@@ -3705,6 +3780,59 @@ export function consumeQuestionTextAnswer(ctx, config, { chatId, senderId, text 
   return true
 }
 
+/**
+ * Retry inbound messages whose session could not be resolved.
+ *
+ * They were queued instead of being marked seen, so this is the only path that
+ * can still deliver them. A message older than the TTL is dropped from the queue
+ * with a notice: retrying a permanent failure forever would be worse.
+ */
+async function flushPendingInbound(ctx, config, seen) {
+  const list = loadPendingInbound(config)
+  if (list.length === 0) return
+  const remaining = []
+  for (const item of list) {
+    if (Date.now() - Number(item.at ?? 0) > PENDING_INBOUND_TTL_MS) {
+      for (const key of item.keys) seen.add(key)
+      persistSeenEvents(config, seen)
+      logInbound(config, { event: 'inbound', result: 'abandoned', level: 'warn', reason: item.reason, messageId: item.messageId })
+      void notifyProblem(config, {
+        key: `pending:${item.messageId || item.at}`,
+        title: '有消息最终没能投递',
+        detail: `原因：${item.reason}\n已放弃重试，需要的话请重发一次。`,
+      })
+      continue
+    }
+    const resolved = await resolveInboundAgent(ctx, config)
+    if (!resolved.agent) {
+      remaining.push({ ...item, reason: resolved.reason })
+      continue
+    }
+    try {
+      const promptId = randomUUID()
+      channelPromptIds.add(promptId)
+      if (channelPromptIds.size > 200) channelPromptIds.delete(channelPromptIds.values().next().value)
+      await resolved.agent.followup({
+        id: promptId,
+        role: 'user',
+        content: [{ type: 'text', text: inboundUserText(item.text) }],
+        source: { kind: 'user' },
+      })
+      lastInboundAt = Date.now()
+      for (const key of item.keys) seen.add(key)
+      persistSeenEvents(config, seen)
+      rememberChat(config, item.sessionId, { chatId: item.chatId, senderId: item.senderId })
+      logInbound(config, {
+        event: 'inbound', result: 'delivered-late', level: 'info',
+        messageId: item.messageId, via: resolved.via, waitedMs: Date.now() - Number(item.at ?? 0),
+      })
+    } catch (error) {
+      remaining.push({ ...item, reason: errorText(error) })
+    }
+  }
+  savePendingInbound(config, remaining)
+}
+
 function startInbound(ctx, config) {
   ctx.inject(['agents'], (scoped) => {
     scoped.effect(() => {
@@ -3766,6 +3894,13 @@ function startInbound(ctx, config) {
         void releaseOwnedAgentIfIdle(config).catch(() => {})
       }, IDLE_RELEASE_CHECK_MS)
       releaseTimer.unref?.()
+
+      // Drain the queue of messages whose session was busy when they arrived.
+      const pendingTimer = setInterval(() => {
+        if (disposed) return
+        void flushPendingInbound(ctx, config, seen).catch(() => {})
+      }, PENDING_INBOUND_RETRY_MS)
+      pendingTimer.unref?.()
 
       let connectionCleanup = () => {}
       // The long connection is best-effort: Feishu spreads events across an
@@ -3913,6 +4048,7 @@ function startInbound(ctx, config) {
       return () => {
         disposed = true
         clearInterval(releaseTimer)
+        clearInterval(pendingTimer)
         clearInterval(reconcileInterval)
         clearConnectionWatch()
         try { offSessionEvent?.() } catch { /* ignore */ }
@@ -3989,7 +4125,7 @@ async function warnInboundDisabled(config) {
     const chatId = String(settings.defaultChatId ?? '').trim() || currentSessionId(config)
     if (!chatId) return
     if (!proactiveAllowed(chatId)) {
-      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-deferred', reason: 'no inbound conversation yet' })
+      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-deferred', level: 'info', reason: 'no inbound conversation yet' })
       return
     }
     if (String(settings.botToken ?? '').trim() === '' && String(settings.appId ?? '').trim() === '') return
@@ -3998,7 +4134,7 @@ async function warnInboundDisabled(config) {
     const state = readChannelState(config)
     const lastAt = Number(state?.inboundDisabledNoticeAt ?? 0)
     if (cooldownMs > 0 && lastAt > 0 && Date.now() - lastAt < cooldownMs) {
-      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-skipped' })
+      logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-skipped', level: 'info' })
       return
     }
     await provider().sendText({
@@ -4007,8 +4143,8 @@ async function warnInboundDisabled(config) {
         + '消息不会被接收。在 profile 的 cordis.patch.yml 对应行设置 inboundEnabled: true，然后重启 DSH。',
     })
     writeChannelState(config, { inboundDisabledNoticeAt: Date.now() })
-    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice', chatId })
+    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice', level: 'info', chatId })
   } catch (error) {
-    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-failed', reason: errorText(error) })
+    logInbound(config, { event: 'channel', result: 'inbound-disabled-notice-failed', level: 'warn', reason: errorText(error) })
   }
 }
