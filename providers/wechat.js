@@ -307,6 +307,8 @@ export function splitForWechat(text, limit = 1800) {
 }
 
 const typingTickets = new Map()
+/** One live typing renewal per user; the status is per user, so timers never stack. */
+const typingLoops = new Map()
 async function typing(settings, userId, contextToken, status) {
   try {
     const cached = typingTickets.get(userId)
@@ -322,9 +324,13 @@ async function typing(settings, userId, contextToken, status) {
       if (ticket) typingTickets.set(userId, { ticket, at: Date.now() })
     }
     if (!ticket) return { ok: false, reason: 'no typing_ticket' }
-    await post(settings, 'ilink/bot/sendtyping', {
+    const response = await post(settings, 'ilink/bot/sendtyping', {
       ilink_user_id: userId, typing_ticket: ticket, status, base_info: baseInfo(),
     }, 10_000)
+    // HTTP 200 is not acceptance: the server reports refusals in `ret`, and a
+    // refusal is the only evidence that a cached ticket went stale.
+    const ret = Number(response?.ret ?? 0)
+    if (ret !== 0) return { ok: false, reason: `ret=${ret} ${response?.errmsg ?? ''}`.trim() }
     return { ok: true }
   } catch (error) {
     return { ok: false, reason: String(error).slice(0, 120) }
@@ -446,11 +452,53 @@ export function createWechatProvider(config = {}, deps = {}) {
   }
   const settingsOf = () => resolveWechatSettings(config)
 
+  /**
+   * The protocol's typing indicator expires, so one report per turn is not
+   * enough: the reference client renews every five seconds until the turn
+   * settles. Renewal failures stay silent (the indicator is decoration), but a
+   * refused renewal means the cached ticket lapsed, so it stops renewing and
+   * forgets the ticket instead of retrying a value the server already rejected.
+   */
+  function stopTypingLoop(userId, { cancel = true } = {}) {
+    const entry = typingLoops.get(userId)
+    if (!entry) return
+    typingLoops.delete(userId)
+    if (entry.timer) clearInterval(entry.timer)
+    if (cancel) void typing(settingsOf(), userId, entry.contextToken, TYPING_OFF)
+  }
+
+  async function startTypingLoop(userId, contextToken) {
+    // A second turn for the same user replaces the first one's indicator rather
+    // than stacking timers: the status is per user.
+    stopTypingLoop(userId, { cancel: false })
+    const first = await typing(settingsOf(), userId, contextToken, TYPING_ON)
+    if (!first.ok) {
+      log({ event: 'typing', result: 'failed', reason: first.reason })
+      return
+    }
+    const seconds = Number(config?.typingRenewSeconds ?? 5)
+    const intervalMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+    if (!intervalMs) return
+    const timer = setInterval(() => {
+      void (async () => {
+        const renewal = await typing(settingsOf(), userId, contextToken, TYPING_ON)
+        if (renewal.ok) return
+        typingTickets.delete(userId)
+        const entry = typingLoops.get(userId)
+        if (entry?.timer) clearInterval(entry.timer)
+        typingLoops.delete(userId)
+        log({ event: 'typing', result: 'renewal-failed', reason: renewal.reason })
+      })()
+    }, intervalMs)
+    timer.unref?.()
+    typingLoops.set(userId, { timer, contextToken })
+  }
+
   async function runActions(stream, actions) {
     for (const action of actions) {
       if (action.kind === 'typing') {
-        const result = await typing(settingsOf(), stream.chatId, stream.contextToken, action.on ? TYPING_ON : TYPING_OFF)
-        if (!result.ok) log({ event: 'typing', result: 'failed', reason: result.reason })
+        if (action.on) await startTypingLoop(stream.chatId, stream.contextToken)
+        else stopTypingLoop(stream.chatId)
         continue
       }
       if (action.kind === 'send') {
@@ -933,6 +981,7 @@ export function createWechatProvider(config = {}, deps = {}) {
       return () => {
         stopped = true
         clearInterval(watchdog)
+        for (const userId of [...typingLoops.keys()]) stopTypingLoop(userId)
         stopController.abort()
         void post(settings, 'ilink/bot/msg/notifystop', { base_info: baseInfo() }, 5_000).catch(() => {})
       }

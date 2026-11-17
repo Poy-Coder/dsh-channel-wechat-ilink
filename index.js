@@ -80,6 +80,8 @@ export const Config = z.object({
   streamingCards: z.boolean().default(true).description('Stream answers into a card; off sends plain text.'),
   textProgressSeconds: z.number().default(30)
     .description('Channels without editable messages (WeChat): seconds without answer text before one progress message is pushed; 0 disables progress messages. Raise it if 30s feels chatty.'),
+  typingRenewSeconds: z.number().default(5)
+    .description('WeChat: resend the typing indicator every N seconds while a turn runs. The protocol indicator expires; the reference client renews every 5 s. 0 sends it once per turn.'),
   wsPingTimeoutSeconds: z.number().default(60)
     .description('Feishu long connection: seconds without a pong or inbound frame after a ping before the socket is treated as dead and reconnected. 0 disables the watchdog (a half-open socket then goes unnoticed).'),
   streamIntervalMs: z.number().default(900)
