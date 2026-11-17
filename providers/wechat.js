@@ -119,8 +119,61 @@ export function loadWechatCursor(accountId) {
 export function saveWechatCursor(accountId, cursor) {
   if (!accountId) return
   try {
-    writeFileSync(wechatSyncFilePath(), JSON.stringify({ accountId, cursor, savedAt: Date.now() }), { mode: 0o600 })
+    const previous = readSyncFile(accountId)
+    const now = Date.now()
+    // iLink hands back a fresh buffer on almost every poll, but only a cursor
+    // older than the missed window is useful for a cold read. One sample per
+    // minute is plenty and keeps the file small.
+    const history = Array.isArray(previous.history) ? previous.history : []
+    const last = history[history.length - 1]
+    const recordable = cursor && (!last || now - Number(last.at ?? 0) >= CURSOR_HISTORY_MIN_GAP_MS)
+    const nextHistory = recordable ? [...history, { cursor, at: now }] : history
+    const pruned = pruneCursorHistory(nextHistory, now)
+    writeFileSync(
+      wechatSyncFilePath(),
+      JSON.stringify({ accountId, cursor, savedAt: now, history: pruned }),
+      { mode: 0o600 },
+    )
   } catch { /* best effort */ }
+}
+
+/** Read the sync file, tolerating a missing or foreign account. */
+function readSyncFile(accountId) {
+  try {
+    const parsed = JSON.parse(readFileSync(wechatSyncFilePath(), 'utf8'))
+    if (parsed?.accountId && accountId && parsed.accountId !== accountId) return {}
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+function pruneCursorHistory(history, now) {
+  const kept = history.filter((entry) => {
+    const at = Number(entry?.at ?? 0)
+    return entry?.cursor && at > 0 && now - at <= CURSOR_HISTORY_TTL_MS
+  })
+  return kept.slice(-CURSOR_HISTORY_LIMIT)
+}
+
+/**
+ * The newest cursor recorded at or before `sinceMs`.
+ *
+ * `getUpdates` does not replay history for an empty cursor, but it DOES answer an
+ * older cursor with the messages it already passed (verified against the live
+ * bot: a pre-message cursor returned that message again). That is what makes a
+ * cold read possible without sending probe messages into the user's chat.
+ */
+export function wechatCursorAtOrBefore(accountId, sinceMs) {
+  const history = pruneCursorHistory(
+    Array.isArray(readSyncFile(accountId).history) ? readSyncFile(accountId).history : [],
+    Date.now(),
+  )
+  if (history.length === 0) return ''
+  const target = Number(sinceMs) || 0
+  let best = ''
+  for (const entry of history) {
+    if (Number(entry.at ?? 0) <= target) best = String(entry.cursor ?? '')
+  }
+  return best || String(history[0]?.cursor ?? '')
 }
 
 /**
@@ -175,6 +228,20 @@ const authHeaders = (token) => ({
 })
 
 const ID_KEYS = new Set(['message_id', 'msg_id', 'svr_id'])
+
+/**
+ * Cursor history for the cold read.
+ *
+ * One sample per minute, kept for two days; the sync file stays a few dozen KB
+ * even for a chat that polls all day. `getUpdates` may hand back a new buffer on
+ * every poll, so recording every one would only rewrite the file constantly.
+ */
+const CURSOR_HISTORY_LIMIT = 300
+const CURSOR_HISTORY_TTL_MS = 48 * 60 * 60 * 1000
+const CURSOR_HISTORY_MIN_GAP_MS = 60 * 1000
+/** A cold read costs one long-poll round trip; five minutes is often enough. */
+const COLD_READ_MIN_GAP_MS = 5 * 60 * 1000
+const COLD_READ_TIMEOUT_MS = 8_000
 
 /**
  * Parse an iLink response without losing 64-bit message ids.
@@ -307,6 +374,8 @@ export function splitForWechat(text, limit = 1800) {
 }
 
 const typingTickets = new Map()
+/** When the last cold read ran; the reconcile loop fires far more often than one is useful. */
+let lastColdReadAt = 0
 /** One live typing renewal per user; the status is per user, so timers never stack. */
 const typingLoops = new Map()
 async function typing(settings, userId, contextToken, status) {
@@ -670,6 +739,47 @@ export function createWechatProvider(config = {}, deps = {}) {
 
     sendText,
     sendAttachment,
+
+    /**
+     * Catch-up for the channel's reconcile loop.
+     *
+     * `getUpdates` ignores an empty cursor's history, but an OLDER cursor still
+     * returns the messages it already passed (verified against the live bot), so
+     * a cold read can find what a stalled poll missed without sending any probe
+     * message into the user's chat. The live cursor is never written here: a cold
+     * read must not make the poll skip ahead.
+     */
+    async listRecentMessages({ sinceMs, limit } = {}) {
+      const now = Date.now()
+      if (now - lastColdReadAt < COLD_READ_MIN_GAP_MS) return []
+      let settings
+      try { settings = settingsOf() } catch { return [] }
+      if (!settings?.botToken) return []
+      const cursor = wechatCursorAtOrBefore(settings.accountId, Number(sinceMs) || 0)
+      if (!cursor) return []
+      lastColdReadAt = now
+      try {
+        const response = await post(settings, 'ilink/bot/getupdates', {
+          get_updates_buf: cursor,
+          base_info: baseInfo(),
+        }, COLD_READ_TIMEOUT_MS)
+        const messages = Array.isArray(response?.msgs) ? response.msgs : []
+        const since = Number(sinceMs) || 0
+        const size = Math.min(50, Math.max(1, Number(limit) || 50))
+        log({ event: 'reconcile', result: 'cold-read', count: messages.length, since })
+        return messages
+          .filter((message) => {
+            const created = Number(message?.create_time_ms)
+            // Keep a message with no timestamp: dropping it would be the very
+            // "silently lost" outcome this path exists to prevent.
+            return !Number.isFinite(created) || created <= 0 || created >= since
+          })
+          .slice(0, size)
+      } catch (error) {
+        log({ event: 'reconcile', result: 'cold-read-failed', reason: String(error).slice(0, 200) })
+        return []
+      }
+    },
 
     /**
      * iLink signs a `context_token` per inbound message, so a bot can only answer
