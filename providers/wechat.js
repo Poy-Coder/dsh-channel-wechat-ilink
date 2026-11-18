@@ -241,7 +241,7 @@ const CURSOR_HISTORY_TTL_MS = 48 * 60 * 60 * 1000
 const CURSOR_HISTORY_MIN_GAP_MS = 60 * 1000
 /** A cold read costs one long-poll round trip; five minutes is often enough. */
 const COLD_READ_MIN_GAP_MS = 5 * 60 * 1000
-const COLD_READ_TIMEOUT_MS = 8_000
+const COLD_READ_TIMEOUT_MS = 4_000
 
 /**
  * Parse an iLink response without losing 64-bit message ids.
@@ -776,7 +776,15 @@ export function createWechatProvider(config = {}, deps = {}) {
           })
           .slice(0, size)
       } catch (error) {
-        log({ event: 'reconcile', result: 'cold-read-failed', reason: String(error).slice(0, 200) })
+        const reason = String(error?.message ?? error)
+        // A cold read answers immediately only when the old cursor still has
+        // something behind it. A timeout therefore means "nothing was missed",
+        // not a fault — the live long poll is holding the same way.
+        if (error?.name === 'AbortError' || /aborted|abort/i.test(reason)) {
+          log({ event: 'reconcile', result: 'cold-read-empty', reason: 'no backlog behind the live cursor' })
+          return []
+        }
+        log({ event: 'reconcile', result: 'cold-read-failed', reason: reason.slice(0, 200) })
         return []
       }
     },
