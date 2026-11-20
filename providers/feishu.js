@@ -381,6 +381,33 @@ export async function sendCard(base, token, { receiveId, receiveIdType, cardId }
 }
 
 /**
+ * Replace a whole card in place.
+ *
+ * Updating one element only changes its text, which left a settled approval card
+ * looking identical to a pending one — same orange header, same two buttons. A
+ * decision is a state change, so the card itself is rebuilt: green/red header, no
+ * buttons, and the outcome as the card's own status.
+ */
+export async function updateCardJson(base, token, { cardId, card, sequence }, signal) {
+  const response = await fetch(`${base}/open-apis/cardkit/v1/cards/${encodeURIComponent(cardId)}`, {
+    method: 'PUT',
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      card: { type: 'card_json', data: JSON.stringify(card) },
+      sequence,
+    }),
+    signal,
+  })
+  const payload = await response.json().catch(() => undefined)
+  if (!response.ok || (payload?.code !== undefined && payload.code !== 0)) {
+    throw new Error(feishuError(payload, `Feishu card replace failed (HTTP ${response.status})`))
+  }
+}
+
+/**
  * Create one CardKit entity from arbitrary card JSON.
  *
  * The streaming reply card is built by `createCard`; interactive question cards
@@ -828,6 +855,10 @@ export function createFeishuProvider(config = {}, deps = {}) {
       async close({ cardId, sequence, summary }, signal) {
         const resolved = await settingsAsync()
         await closeCard(resolved.baseUrl, await token(signal), { cardId, sequence, summary }, signal)
+      },
+      async updateRaw({ cardId, card, sequence }, signal) {
+        const resolved = await settingsAsync()
+        await updateCardJson(resolved.baseUrl, await token(signal), { cardId, card, sequence }, signal)
       },
     },
 

@@ -19,7 +19,7 @@ dsh plugin add dsh-channel-wechat-ilink
 
 ```bash
 dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
-dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.19/dsh-channel-wechat-ilink-0.1.19.tgz
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.20/dsh-channel-wechat-ilink-0.1.20.tgz
 ```
 
 依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。

@@ -3755,21 +3755,37 @@ function finishApproval(config, pending, outcome) {
     event: 'approval', result: outcome, tool: pending.toolName, sessionId: pending.sessionId,
   })
   // Record the decision on the card itself: the transcript should not show a
-  // request whose answer lives only in the model's log.
+  // request whose answer lives only in the model's log. The whole card is replaced,
+  // not one line of it — a settled approval must look settled (coloured header, no
+  // buttons), otherwise the reader cannot tell whether their click landed.
   if (pending.cardId) {
     const decision = outcome === 'allowed-once' ? 'allow' : outcome === 'rejected' ? 'deny' : undefined
-    const status = decision === 'allow'
-      ? '<font color="green">已允许这一次。</font>'
-      : decision === 'deny'
-        ? '<font color="red">已拒绝。</font>'
-        : '<font color="grey">已取消。</font>'
+    const card = approvalCardJson({ toolName: pending.toolName, reason: pending.reason, decision })
+    const headline = decision === 'allow' ? '已允许这一次' : decision === 'deny' ? '已拒绝' : '已取消'
     pending.sequence = Number(pending.sequence ?? 1) + 1
-    void provider().card.update({
-      cardId: pending.cardId,
-      content: status,
-      sequence: pending.sequence,
-      elementId: APPROVAL_STATUS_ELEMENT_ID,
-    }).catch(() => {})
+    void (async () => {
+      try {
+        await provider().card.updateRaw({ cardId: pending.cardId, card, sequence: pending.sequence })
+        await provider().card.close({
+          cardId: pending.cardId, sequence: pending.sequence + 1, summary: headline,
+        }).catch(() => {})
+      } catch (error) {
+        // Older deployments may not expose the whole-card update; the status line
+        // still changes, which is what the first version did.
+        logInbound(config, { event: 'approval', result: 'card-replace-failed', reason: errorText(error) })
+        const status = decision === 'allow'
+          ? '<font color="green">已允许这一次。</font>'
+          : decision === 'deny'
+            ? '<font color="red">已拒绝。</font>'
+            : '<font color="grey">已取消。</font>'
+        await provider().card.update({
+          cardId: pending.cardId,
+          content: status,
+          sequence: pending.sequence,
+          elementId: APPROVAL_STATUS_ELEMENT_ID,
+        }).catch(() => {})
+      }
+    })()
   }
   pending.resolve(outcome)
 }
