@@ -19,7 +19,7 @@ dsh plugin add dsh-channel-wechat-ilink
 
 ```bash
 dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
-dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.17/dsh-channel-wechat-ilink-0.1.17.tgz
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.18/dsh-channel-wechat-ilink-0.1.18.tgz
 ```
 
 依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。
@@ -92,6 +92,30 @@ dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/do
 **进度感**：收到消息立刻显示「对方正在输入…」，每 5 秒续期，长任务期间不会消失；超过 `textProgressSeconds`（默认 30 秒）还没有正文才补一条文字进度（`还在跑 · 正在执行 xxx · 已用时 35s`）。嫌吵把 `textProgressSeconds` 设成 `0`，就只剩「正在输入」。
 
 **它不会做的**：不改你的消息、不撤回、不发卡片；群聊不支持（只处理一对一的私聊）。
+
+### 需要批准时会在聊天里问你
+
+权限预设 `workspace-write` 会拦住"写工作区以外"的操作。微信里没有批准按钮，所以插件把审批转到聊天里：
+
+```
+微信通道需要你批准一次工具调用
+工具：pwsh
+原因：写入工作区以外的路径
+
+回复 1 允许这一次，回复 2 拒绝。
+超过 5 分钟没回复，按拒绝处理。
+```
+
+- 回 `1` / `允许` / `同意` → 只放行这一次；
+- 回 `2` / `拒绝` / `取消` → 拒绝；
+- 回别的内容不当审批答案，照常交给模型（可以先解释为什么需要它）；
+- 超时按拒绝处理——沉默不等于同意。
+
+不想被问就把 `permissionPreset` 设成 `danger-full-access`（不再拦截，也不再问）。
+
+### 长回答发不出去时会告诉你
+
+超过 1800 字的回答会拆续条，**每一段独立重试**（0.8s / 2s / 5s）。如果某段最终还是失败，你会收到一句明确说明，而不是"看到前半段、后半段永远不来"。
 
 ## 与飞书的差异
 
