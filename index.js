@@ -88,6 +88,10 @@ export const Config = z.object({
     .description('Channels without editable messages (WeChat): refresh interval of the live answer bubble in milliseconds. Larger is gentler on the connection, smaller looks smoother.'),
   autoReply: z.boolean().default(true).description('Deliver each turn\u2019s answer back to the originating chat.'),
   questionCards: z.boolean().default(true).description('Answer ask_user_question in Feishu with an interactive card (buttons plus a text-reply fallback).'),
+  approvalPrompts: z.boolean().default(true)
+    .description('Ask the chat to approve tool calls that need permission, instead of letting an unattended turn stall on an approval nobody can click. No reply counts as a refusal.'),
+  approvalTimeoutSeconds: z.number().default(300)
+    .description('How long an approval prompt waits for a reply before it is treated as refused.'),
   questionTimeoutSeconds: z.number().default(600).description('Seconds a question card waits for an answer before it is skipped; 0 waits forever.'),
   thinking: z.boolean().default(true).description('Show the native thinking process (reasoning and tool calls) during a turn.'),
   thinkingHidden: z.boolean().default(false).description('Hide the thinking process once the turn finishes.'),
@@ -2907,6 +2911,13 @@ export async function handleInboundEvent(ctx, config, data, seen) {
     return
   }
 
+  // A pending approval owns the next reply before a pending question does: an
+  // approval blocks the whole turn, so a stale question must not swallow it.
+  if (consumeApprovalTextAnswer(ctx, config, { chatId, senderId, text })) {
+    markSeen()
+    return
+  }
+
   // A pending question owns the next reply in its chat: a numbered, labelled or
   // free-text answer settles the tool call instead of starting a new turn.
   if (consumeQuestionTextAnswer(ctx, config, { chatId, senderId, text })) {
@@ -3636,8 +3647,136 @@ async function sendQuestionCard(ctx, config, pending) {
  * Claims only questions owned by a session the channel has seen come from a
  * Feishu chat; anything else returns `next()` so the Web GUI keeps working.
  */
+// ---------------------------------------------------------------------------
+// Permission approvals
+//
+// A channel turn is unattended, so an `ask` approval policy is a dead end: the
+// session waits for a click nobody can make, and the turn ends stalled instead of
+// telling the user anything. The `approval/request` waterfall (agent-scoped, the
+// same shape as `user-questions/request`) turns that into one chat reply.
+//
+// Defaults are deliberately closed: no answer means rejected. Silence must never
+// be read as permission.
+// ---------------------------------------------------------------------------
+
+/** One in-flight approval per session: two are indistinguishable in one chat. */
+const pendingApprovals = new Map()
+
+function finishApproval(config, pending, outcome) {
+  if (pending.done) return
+  pending.done = true
+  pendingApprovals.delete(pending.key)
+  if (pending.timer) {
+    clearTimeout(pending.timer)
+    pending.timer = undefined
+  }
+  try {
+    if (pending.abortHandler) pending.signal?.removeEventListener?.('abort', pending.abortHandler)
+  } catch { /* ignore */ }
+  logInbound(config, {
+    event: 'approval', result: outcome, tool: pending.toolName, sessionId: pending.sessionId,
+  })
+  pending.resolve(outcome)
+}
+
+/**
+ * Compose the channel as an `approval/request` answerer.
+ * @param {object} ctx
+ * @param {object} config
+ * @param {object} request `{ agent, toolName, reason, displayReason, signal }`
+ * @param {() => Promise<string>} next
+ * @returns {Promise<'allowed-once' | 'rejected' | 'cancelled' | string>}
+ */
+export async function answerApproval(ctx, config, request, next) {
+  if (config.approvalPrompts === false) return await next()
+  const sessionId = String(request?.agent?.id ?? '')
+  const chatId = sessionId ? questionChatOf(config, sessionId) : ''
+  if (!sessionId || !chatId) return await next()
+  if (pendingApprovals.has(sessionId)) return await next()
+
+  const toolName = String(request?.toolName ?? 'tool')
+  const reason = String(
+    request?.displayReason?.['zh-Hans']
+    ?? request?.displayReason?.['zh']
+    ?? request?.displayReason?.en
+    ?? request?.reason
+    ?? '',
+  ).trim()
+  const seconds = Number(config.approvalTimeoutSeconds ?? 300)
+  const timeoutMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+
+  const pending = {
+    key: sessionId, sessionId, chatId, toolName, reason,
+    done: false, resolve: undefined, timer: undefined,
+    signal: request?.signal, abortHandler: undefined, askedAt: Date.now(),
+  }
+  const outcome = new Promise((resolve) => { pending.resolve = resolve })
+  pendingApprovals.set(sessionId, pending)
+
+  const lines = [
+    `${channelProfile(config).label}通道需要你批准一次工具调用`,
+    `工具：${toolName}`,
+  ]
+  if (reason) lines.push(`原因：${reason}`)
+  lines.push('', '回复 1 允许这一次，回复 2 拒绝。')
+  if (timeoutMs > 0) lines.push(`超过 ${Math.round(timeoutMs / 60_000)} 分钟没回复，按拒绝处理。`)
+
+  try {
+    await sendChannelText(config, chatId, lines.join('\n'))
+  } catch (error) {
+    pending.done = true
+    pendingApprovals.delete(sessionId)
+    // Without a message there is nothing to answer: fall through so the
+    // deployment's own policy (which may be a GUI) gets its turn.
+    logInbound(config, { event: 'approval', result: 'ask-failed', reason: errorText(error), tool: toolName })
+    return await next()
+  }
+
+  if (timeoutMs > 0) {
+    pending.timer = setTimeout(() => finishApproval(config, pending, 'rejected'), timeoutMs)
+    pending.timer.unref?.()
+  }
+  if (pending.signal) {
+    pending.abortHandler = () => finishApproval(config, pending, 'cancelled')
+    try { pending.signal.addEventListener('abort', pending.abortHandler, { once: true }) } catch { /* ignore */ }
+  }
+  return await outcome
+}
+
+/**
+ * Read a chat reply as an approval answer.
+ *
+ * Deliberately narrow: only a clear yes or no settles the request. Anything else
+ * is treated as a new message to the agent, so a user can keep explaining why they
+ * want it instead of being forced into a two-word answer.
+ * @param {string} text
+ * @returns {'allow' | 'deny' | undefined}
+ */
+export function parseApprovalAnswer(text) {
+  const answer = String(text ?? '').trim()
+  if (!answer) return undefined
+  if (/^(1|y|yes|ok|允许|同意|可以|好|批准|行)$/i.test(answer)) return 'allow'
+  if (/^(2|n|no|拒绝|不行|不允许|否|取消|别)$/i.test(answer)) return 'deny'
+  return undefined
+}
+
+/**
+ * Consume a chat reply as the answer to a pending approval.
+ * @returns true when the message settled the approval and must not start a turn
+ */
+export function consumeApprovalTextAnswer(ctx, config, { chatId, senderId, text }) {
+  if (config.approvalPrompts === false) return false
+  const pending = [...pendingApprovals.values()].find((item) => item.chatId === chatId && !item.done)
+  if (!pending) return false
+  const verdict = parseApprovalAnswer(text)
+  if (!verdict) return false
+  lastInboundAt = Date.now()
+  finishApproval(config, pending, verdict === 'allow' ? 'allowed-once' : 'rejected')
+  void sendChannelText(config, chatId, verdict === 'allow' ? '已允许这一次。' : '已拒绝。').catch(() => {})
+  return true
+}
+
 export async function answerUserQuestion(ctx, config, request, next) {
-  if (config.questionCards === false) return await next()
   const sessionId = String(request?.agent?.id ?? '')
   const chatId = sessionId ? questionChatOf(config, sessionId) : ''
   if (!sessionId || !chatId) return await next()
@@ -3911,6 +4050,14 @@ function startInbound(ctx, config) {
         ? scoped.on('user-questions/request', (request, next) => answerUserQuestion(scoped, config, request, next), { prepend: true })
         : undefined
 
+      // Answer permission approvals the same way. A channel turn is unattended,
+      // so an `ask` policy has nobody to answer it and the turn stalls; asking in
+      // the chat turns that dead end into one reply. Prepended for the same reason
+      // as the question answerer: the chat wins over a relay that nobody watches.
+      const offApproval = typeof scoped.on === 'function'
+        ? scoped.on('approval/request', (request, next) => answerApproval(scoped, config, request, next), { prepend: true })
+        : undefined
+
       // Periodically hand back an idle plugin-owned agent; the app re-resumes
       // the session on demand, so a quiet channel costs nothing.
       const releaseTimer = setInterval(() => {
@@ -4105,6 +4252,8 @@ function startInbound(ctx, config) {
         try { offSessionEvent?.() } catch { /* ignore */ }
         try { offInbox?.() } catch { /* ignore */ }
         try { offQuestion?.() } catch { /* ignore */ }
+        try { offApproval?.() } catch { /* ignore */ }
+        for (const pending of [...pendingApprovals.values()]) finishApproval(config, pending, 'cancelled')
         try { connectionCleanup() } catch { /* ignore */ }
         disposeAgentStreams()
         channelRuntime = undefined

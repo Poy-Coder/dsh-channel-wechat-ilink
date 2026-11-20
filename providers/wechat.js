@@ -622,19 +622,62 @@ export function createWechatProvider(config = {}, deps = {}) {
     const body = String(text ?? '')
     if (!body.trim()) return { ok: true, messageId: '', chatId }
     let messageId = ''
-    for (const chunk of splitForWechat(body)) {
-      try {
-        messageId = await sendMessage(chatId, [{ type: ITEM_TEXT, text_item: { text: chunk } }])
-      } catch (error) {
-        // A context token is issued per inbound message. A send without one is
-        // rejected ("prepare failed"), but keep the token anyway: deleting it
-        // would make every later reply impossible until the user speaks again.
-        if (!contextTokenOf(chatId)) throw error
-        log({ event: 'send', result: 'retry-without-context', reason: String(error).slice(0, 160) })
-        messageId = await sendMessage(chatId, [{ type: ITEM_TEXT, text_item: { text: chunk } }], { omitContextToken: true })
-      }
+    const chunks = splitForWechat(body)
+    for (const [index, chunk] of chunks.entries()) {
+      // A long answer is several messages; each one is retried on its own with a
+      // growing backoff before the turn is reported as partially delivered. The
+      // first version retried the whole flush once, which could resend an already
+      // delivered head and still leave the tail missing.
+      messageId = await sendChunkWithRetry(chatId, chunk, index, chunks.length)
     }
     return { ok: true, messageId, chatId }
+  }
+
+  /**
+   * Send one chunk, retrying a transient failure.
+   *
+   * A `ret=-2 prepare failed` means the cached context token was rejected; that is
+   * retried once without it. Network and 5xx failures get the full backoff, and a
+   * chunk that still fails throws with the index so the caller can say which part
+   * of a long answer never arrived.
+   */
+  async function sendChunkWithRetry(chatId, chunk, index, total) {
+    const backoff = [0, 800, 2_000, 5_000]
+    let lastError
+    for (const [attempt, wait] of backoff.entries()) {
+      if (wait > 0) await sleep(wait)
+      try {
+        return await sendMessage(chatId, [{ type: ITEM_TEXT, text_item: { text: chunk } }])
+      } catch (error) {
+        lastError = error
+        const message = String(error?.message ?? error)
+        // A rejected context token comes back two ways: `ret=-2 prepare failed`
+        // and `ret=100 context token expired`. Both are retried once without it —
+        // the token is kept, because deleting it would mute the channel until the
+        // user speaks again.
+        const staleContext = /ret\s*=\s*(?:-2|100)|prepare failed|context token/i.test(message)
+          && Boolean(contextTokenOf(chatId))
+        if (staleContext) {
+          log({ event: 'send', result: 'retry-without-context', reason: message.slice(0, 160), chunk: index })
+          try {
+            return await sendMessage(chatId, [{ type: ITEM_TEXT, text_item: { text: chunk } }], { omitContextToken: true })
+          } catch (again) {
+            lastError = again
+          }
+        }
+        const retryable = staleContext || /timeout|ECONN|ETIMEDOUT|EAI_AGAIN|50\d\b|429/i.test(message)
+        if (!retryable) break
+        log({
+          event: 'send', result: 'retry', reason: message.slice(0, 160), chunk: index, attempt: attempt + 1,
+        })
+      }
+    }
+    const reason = String(lastError?.message ?? lastError ?? 'unknown')
+    log({ event: 'send', result: 'chunk-failed', reason: reason.slice(0, 200), chunk: index, total })
+    const failure = new Error(`chunk ${index + 1}/${total} failed: ${reason}`)
+    failure.chunkIndex = index
+    failure.chunkTotal = total
+    throw failure
   }
 
   // -------------------------------------------------------------------------
@@ -941,12 +984,19 @@ export function createWechatProvider(config = {}, deps = {}) {
             }
           }
         } catch (error) {
-          log({ event: 'stream', result: 'finish-failed', reason: String(error).slice(0, 200) })
-          // A failed final message is the one failure the user definitely sees:
-          // retry once after a beat before giving up.
-          await sleep(800)
-          try { await flushStream(stream, true) } catch (again) {
-            log({ event: 'stream', result: 'finish-failed-again', reason: String(again).slice(0, 200) })
+          const reason = String(error?.message ?? error)
+          log({ event: 'stream', result: 'finish-failed', reason: reason.slice(0, 200) })
+          // Each chunk already retried with backoff; reaching this point means the
+          // answer is now incomplete on the user's phone. Retrying the whole flush
+          // would resend the head, so say so instead — a partial answer the user
+          // knows about is recoverable, a silent one is not.
+          try {
+            await sendText({
+              chatId: stream.chatId,
+              text: '（这条回答没有完整发出去，可能是网络原因。可以让我重发一次，或在桌面端查看完整内容。）',
+            })
+          } catch (noticeError) {
+            log({ event: 'stream', result: 'finish-notice-failed', reason: String(noticeError?.message ?? noticeError).slice(0, 160) })
           }
         }
         await runActions(stream, stream.engine.finish(''))
