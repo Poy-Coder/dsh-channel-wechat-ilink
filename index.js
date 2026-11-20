@@ -1680,8 +1680,21 @@ const RECONCILE_WINDOW_MS = 30 * 60_000
 const RECONCILE_INTERVAL_MS = 2 * 60_000
 const IDLE_PROBE_MS = 2_000
 
-/** How long a dropped long connection may stay down before the chat is told. */
-const CONNECTION_DOWN_NOTICE_MS = 20_000
+/**
+ * How long a dropped long connection may stay down before the chat is told.
+ *
+ * A normal reconnect lands in seconds; every drop this channel has seen healed in
+ * 8–24 s, so a shorter threshold only produced cards about something the user
+ * never noticed. Ninety seconds is past any self-healing blip.
+ */
+const CONNECTION_DOWN_NOTICE_MS = 90_000
+
+/** Short drops inside this window count as one "unstable connection" message. */
+const CONNECTION_FLAP_WINDOW_MS = 10 * 60_000
+const CONNECTION_FLAP_LIMIT = 3
+
+/** Connection news is not urgent: at most one message per this window. */
+const CONNECTION_NOTICE_MIN_MS = 10 * 60_000
 
 /** How often the loaded plugin refreshes its runtime marker for the watchdog. */
 const RUNTIME_HEARTBEAT_MS = 5 * 60_000
@@ -1865,10 +1878,13 @@ function proactiveAllowed(chatId) {
   }
 }
 
-async function notifyProblem(config, { key, title, detail, chatId }) {
+async function notifyProblem(config, { key, title, detail, chatId, minIntervalMs }) {
   if (config?.problemNotices === false) return false
   const now = Date.now()
-  if (now - (problemNoticedAt.get(key) ?? 0) < PROBLEM_NOTICE_MIN_MS) return false
+  const floor = Number.isFinite(Number(minIntervalMs)) && Number(minIntervalMs) > 0
+    ? Math.max(PROBLEM_NOTICE_MIN_MS, Number(minIntervalMs))
+    : PROBLEM_NOTICE_MIN_MS
+  if (now - (problemNoticedAt.get(key) ?? 0) < floor) return false
   let target = String(chatId ?? '').trim()
   if (!target) {
     try { target = String(provider().settings().defaultChatId ?? '').trim() } catch { target = '' }
@@ -3975,11 +3991,16 @@ function startInbound(ctx, config) {
         void reconcile()
       }, RECONCILE_INTERVAL_MS)
       reconcileInterval.unref?.()
-      // A connection that stays down is a silent channel: a normal reconnect lands
-      // in seconds, so wait a moment and only then explain what happened.
+      // A connection that stays down is a silent channel, but a blip that heals in
+      // seconds is not news: the notice waits `CONNECTION_DOWN_NOTICE_MS` and only
+      // then explains what happened. A recovered connection reports only when that
+      // notice actually went out, so a self-healing drop stays completely silent.
       let connectionDownAt = 0
       let connectionDownReason = ''
       let connectionDownTimer
+      let connectionDownNoticeSent = false
+      /** Down timestamps inside the flap window; several of them are one message. */
+      const connectionFlaps = []
       const clearConnectionWatch = () => {
         if (connectionDownTimer) clearTimeout(connectionDownTimer)
         connectionDownTimer = undefined
@@ -4017,11 +4038,31 @@ function startInbound(ctx, config) {
                 // Why it dropped is the first question asked, and the recovery
                 // notice used to be the one place that did not answer it.
                 logInbound(config, { event: 'connection', result: 'recovered', seconds, reason: downReason })
-                void notifyProblem(config, {
-                  key: 'connection-up',
-                  title: `${channelProfile(config).label}长连接已恢复`,
-                  detail: `断开约 ${seconds} 秒后自动重连成功（原因：${downReason}）；这期间发来的消息可能没收到。`,
-                })
+                const now = Date.now()
+                connectionFlaps.push(now)
+                while (connectionFlaps.length > 0 && now - connectionFlaps[0] > CONNECTION_FLAP_WINDOW_MS) {
+                  connectionFlaps.shift()
+                }
+                if (connectionDownNoticeSent) {
+                  void notifyProblem(config, {
+                    key: 'connection-up',
+                    minIntervalMs: CONNECTION_NOTICE_MIN_MS,
+                    title: `${channelProfile(config).label}长连接已恢复`,
+                    detail: `断开约 ${seconds} 秒后自动重连成功（原因：${downReason}）；这期间发来的消息可能没收到。`,
+                  })
+                } else if (connectionFlaps.length >= CONNECTION_FLAP_LIMIT) {
+                  // Repeated short drops already self-healed, so a per-drop card would
+                  // be pure noise. Say it once, then stay quiet for the cooldown.
+                  void notifyProblem(config, {
+                    key: 'connection-flapping',
+                    minIntervalMs: CONNECTION_NOTICE_MIN_MS,
+                    title: `${channelProfile(config).label}连接不稳定`,
+                    detail: `最近 ${Math.round(CONNECTION_FLAP_WINDOW_MS / 60_000)} 分钟内断开 ${connectionFlaps.length} 次，`
+                      + `每次都在 ${seconds} 秒左右自动恢复。可能是网络或代理在回收长连接；`
+                      + `如果消息有缺失，可以查看日志：${inboundLogPath(config)}`,
+                  })
+                }
+                connectionDownNoticeSent = false
               }
               void announceReady(config)
               scheduleReconcile()
@@ -4036,11 +4077,14 @@ function startInbound(ctx, config) {
             if (connectionDownTimer) return
             connectionDownTimer = setTimeout(() => {
               connectionDownTimer = undefined
+              // Remember whether the user was actually told: the recovery card is
+              // only worth sending when the drop was announced in the first place.
               void notifyProblem(config, {
                 key: 'connection-down',
+                minIntervalMs: CONNECTION_NOTICE_MIN_MS,
                 title: `${channelProfile(config).label}长连接断开`,
                 detail: `原因：${String(error || 'unknown')}\n正在自动重连；恢复后会再报一次。`,
-              })
+              }).then((sent) => { connectionDownNoticeSent = Boolean(sent) })
             }, CONNECTION_DOWN_NOTICE_MS)
             connectionDownTimer.unref?.()
           },
