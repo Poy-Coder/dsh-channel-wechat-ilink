@@ -781,7 +781,7 @@ export function createWechatProvider(config = {}, deps = {}) {
         // something behind it. A timeout therefore means "nothing was missed",
         // not a fault — the live long poll is holding the same way.
         if (error?.name === 'AbortError' || /aborted|abort/i.test(reason)) {
-          log({ event: 'reconcile', result: 'cold-read-empty', reason: 'no backlog behind the live cursor' })
+          log({ event: 'reconcile', result: 'cold-read-empty', level: 'info', reason: 'no backlog behind the live cursor' })
           return []
         }
         log({ event: 'reconcile', result: 'cold-read-failed', reason: reason.slice(0, 200) })

@@ -92,7 +92,8 @@ export const Config = z.object({
   thinking: z.boolean().default(true).description('Show the native thinking process (reasoning and tool calls) during a turn.'),
   thinkingHidden: z.boolean().default(false).description('Hide the thinking process once the turn finishes.'),
   reactions: z.boolean().default(true).description('Acknowledge an inbound message with a reaction while the turn runs.'),
-  permissionPreset: z.string().default('danger-full-access').description('Permission preset applied to sessions in this channel\u2019s workspace.'),
+  permissionPreset: z.string().default('workspace-write')
+    .description('Permission preset applied to sessions in this channel\u2019s workspace. The default confines writes to the workspace; a channel turn is unattended, so an out-of-workspace action waits for an approval nobody can click in the chat — set danger-full-access only when you accept that trade.'),
   applyPermissionPreset: z.boolean().default(true).description('Turn the permission preset switch off.'),
   region: z.union([z.const('feishu'), z.const('lark')]).default('feishu').description('Feishu China or Lark international.'),
   appId: z.string().default('').description('Optional app id; prefer the credentials store or credentials file.'),
@@ -1417,7 +1418,7 @@ const statusTool = (config) => ({
       streamingCards: config.streamingCards !== false,
       permissionPreset: config.applyPermissionPreset === false
         ? ''
-        : String(config.permissionPreset ?? 'danger-full-access'),
+        : String(config.permissionPreset ?? 'workspace-write'),
       inboundReady: Boolean(inbound.ready),
       inboundTransport: String(inbound.transport ?? ''),
       inboundError: String(inbound.error ?? ''),
@@ -1561,16 +1562,22 @@ export async function attachToFeishuWorkspace(ctx, config, sessionId) {
 /**
  * Apply the channel's permission preset to a session the channel will drive.
  *
- * A Feishu turn runs unattended: an `ask` policy has nobody in front of the GUI
- * to answer it, so the session would stall on its first approval. `set()` records
- * the switch durably and is a no-op when the knobs already match, which makes it
- * safe to run on every activation. Configure with `permissionPreset` (default
- * `danger-full-access`) or disable with `applyPermissionPreset: false`.
+ * The default is `workspace-write`: writes stay inside the workspace, which is
+ * what an IM turn usually needs. The preset also carries `approval: ask`, and a
+ * channel turn has nobody in front of the GUI — an out-of-workspace action waits
+ * for an approval the chat cannot answer, so that turn ends stalled rather than
+ * silently elevated. `danger-full-access` removes the prompt and the confinement
+ * together; a deployment that needs unattended out-of-workspace writes opts into
+ * it explicitly instead of getting it by default.
+ *
+ * `set()` records the switch durably and is a no-op when the knobs already match,
+ * which makes it safe to run on every activation. Configure with
+ * `permissionPreset` or disable with `applyPermissionPreset: false`.
  *
  * `target` may be an Agent (its `session`) or a Session.
  */
 function applyPermissionPreset(ctx, config, target) {
-  const name = String(config.permissionPreset ?? 'danger-full-access').trim()
+  const name = String(config.permissionPreset ?? 'workspace-write').trim()
   if (!name || config.applyPermissionPreset === false) return false
   const session = target?.session ?? target
   if (!session?.id) return false
@@ -2619,7 +2626,7 @@ export async function statusText(ctx, config, chatId) {
   } catch { /* title is optional */ }
   const preset = config.applyPermissionPreset === false
     ? '(按会话自身策略)'
-    : String(config.permissionPreset ?? 'danger-full-access')
+    : String(config.permissionPreset ?? 'workspace-write')
   return [
     `会话：${sessionId || '(未配置)'}`,
     ...(title ? [`标题：${title}`] : []),
