@@ -3286,6 +3286,81 @@ export function questionCardJson({ callId, questions, selections, skipped, note,
   }
 }
 
+/**
+ * The approval card: two buttons instead of "reply 1 or 2".
+ *
+ * A numbered reply works everywhere, but it asks the reader to type a digit on a
+ * phone and leaves the outcome ambiguous in the transcript. A card answers with a
+ * structured value, patches itself to the settled state, and still documents the
+ * decision in the chat. The text prompt stays as the fallback for channels without
+ * cards and for users who would rather type.
+ *
+ * @param {{ toolName: string, reason?: string, decision?: 'allow' | 'deny' }} input
+ * @returns {object} a CardKit 2.0 card
+ */
+export function approvalCardJson({ toolName, reason, decision }) {
+  const elements = []
+  const lines = [`**工具**：${escapeMarkdownInline(toolName || 'tool')}`]
+  if (reason) lines.push(`**原因**：${escapeMarkdownInline(reason)}`)
+  elements.push({ tag: 'markdown', content: lines.join('\n') })
+
+  if (decision) {
+    elements.push({
+      tag: 'markdown',
+      element_id: APPROVAL_STATUS_ELEMENT_ID,
+      content: decision === 'allow'
+        ? '<font color="green">已允许这一次。</font>'
+        : '<font color="red">已拒绝。</font>',
+    })
+  } else {
+    elements.push({
+      tag: 'markdown',
+      element_id: APPROVAL_STATUS_ELEMENT_ID,
+      text_size: 'notation',
+      content: '<font color="grey">等待你的批准… 也可以直接回复 1 允许 / 2 拒绝。</font>',
+    })
+    elements.push(fillRow([
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: '允许这一次' },
+        type: 'primary',
+        behaviors: [{ type: 'callback', value: { a: 'allow' } }],
+      },
+      {
+        tag: 'button',
+        text: { tag: 'plain_text', content: '拒绝' },
+        type: 'danger',
+        behaviors: [{ type: 'callback', value: { a: 'deny' } }],
+      },
+    ]))
+  }
+
+  const headline = decision === 'allow'
+    ? '已允许这一次'
+    : decision === 'deny' ? '已拒绝' : '需要你批准一次工具调用'
+  return {
+    schema: '2.0',
+    config: {
+      // Same reason as the question card: without streaming_mode the element update
+      // that records the decision fails with `300309 streaming mode is closed`.
+      streaming_mode: true,
+      update_multi: true,
+      width_mode: 'fill',
+      summary: { content: headline },
+    },
+    header: {
+      title: { tag: 'plain_text', content: headline },
+      template: decision === 'allow' ? 'green' : decision === 'deny' ? 'red' : 'orange',
+    },
+    body: { elements },
+  }
+}
+
+/** Plain text has no inline markdown escape; keep card text from breaking layout. */
+function escapeMarkdownInline(text) {
+  return String(text ?? '').replace(/[*_`~]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 /** Plain-text fallback used when the card cannot be sent at all. */
 /**
  * The question as plain text, for a channel that has no cards.
@@ -3662,6 +3737,9 @@ async function sendQuestionCard(ctx, config, pending) {
 /** One in-flight approval per session: two are indistinguishable in one chat. */
 const pendingApprovals = new Map()
 
+/** Element id the approval card patches when the decision is made. */
+const APPROVAL_STATUS_ELEMENT_ID = 'approval_status'
+
 function finishApproval(config, pending, outcome) {
   if (pending.done) return
   pending.done = true
@@ -3676,6 +3754,23 @@ function finishApproval(config, pending, outcome) {
   logInbound(config, {
     event: 'approval', result: outcome, tool: pending.toolName, sessionId: pending.sessionId,
   })
+  // Record the decision on the card itself: the transcript should not show a
+  // request whose answer lives only in the model's log.
+  if (pending.cardId) {
+    const decision = outcome === 'allowed-once' ? 'allow' : outcome === 'rejected' ? 'deny' : undefined
+    const status = decision === 'allow'
+      ? '<font color="green">已允许这一次。</font>'
+      : decision === 'deny'
+        ? '<font color="red">已拒绝。</font>'
+        : '<font color="grey">已取消。</font>'
+    pending.sequence = Number(pending.sequence ?? 1) + 1
+    void provider().card.update({
+      cardId: pending.cardId,
+      content: status,
+      sequence: pending.sequence,
+      elementId: APPROVAL_STATUS_ELEMENT_ID,
+    }).catch(() => {})
+  }
   pending.resolve(outcome)
 }
 
@@ -3722,14 +3817,27 @@ export async function answerApproval(ctx, config, request, next) {
   if (timeoutMs > 0) lines.push(`超过 ${Math.round(timeoutMs / 60_000)} 分钟没回复，按拒绝处理。`)
 
   try {
-    await sendChannelText(config, chatId, lines.join('\n'))
+    const card = approvalCardJson({ toolName, reason })
+    const cardId = await provider().card.createRaw({ card })
+    const messageId = await provider().card.attach({ chatId, cardId })
+    pending.cardId = cardId
+    pending.messageId = messageId
+    pending.sequence = 1
+    logInbound(config, {
+      event: 'approval', result: 'card-sent', tool: toolName, sessionId, chatId, cardId, messageId,
+    })
   } catch (error) {
-    pending.done = true
-    pendingApprovals.delete(sessionId)
-    // Without a message there is nothing to answer: fall through so the
-    // deployment's own policy (which may be a GUI) gets its turn.
-    logInbound(config, { event: 'approval', result: 'ask-failed', reason: errorText(error), tool: toolName })
-    return await next()
+    // No cards on this channel (WeChat), or the card failed: the numbered prompt
+    // is the delivery path, not a degraded one.
+    logInbound(config, { event: 'approval', result: 'card-failed', reason: errorText(error), tool: toolName })
+    try {
+      await sendChannelText(config, chatId, lines.join('\n'))
+    } catch (sendError) {
+      pending.done = true
+      pendingApprovals.delete(sessionId)
+      logInbound(config, { event: 'approval', result: 'ask-failed', reason: errorText(sendError), tool: toolName })
+      return await next()
+    }
   }
 
   if (timeoutMs > 0) {
@@ -3839,6 +3947,30 @@ export async function answerUserQuestion(ctx, config, request, next) {
  * Handle one card button click.
  * @returns a toast for the Feishu client, or undefined to ignore the event.
  */
+/**
+ * Settle one approval from a card button click.
+ * @param {object} ctx
+ * @param {object} config
+ * @param {object} action normalised card action
+ * @param {'allow' | 'deny'} verdict
+ */
+function settleApprovalCard(ctx, config, action, verdict) {
+  const pending = [...pendingApprovals.values()].find((item) => item.messageId && item.messageId === action.messageId)
+    ?? [...pendingApprovals.values()].find((item) => item.chatId === action.chatId && !item.done)
+  if (!pending || pending.done) {
+    return { toast: { type: 'info', content: '这次审批已经结束。' } }
+  }
+  if (pending.chatId && action.chatId && action.chatId !== pending.chatId) return undefined
+  lastInboundAt = Date.now()
+  finishApproval(config, pending, verdict === 'allow' ? 'allowed-once' : 'rejected')
+  return {
+    toast: {
+      type: 'success',
+      content: verdict === 'allow' ? '已允许这一次' : '已拒绝',
+    },
+  }
+}
+
 export async function handleQuestionCardAction(ctx, config, raw) {
   const action = provider().normalizeCardAction(raw)
   if (!action) return undefined
@@ -3852,7 +3984,16 @@ export async function handleQuestionCardAction(ctx, config, raw) {
   }
   const pending = [...pendingQuestions.values()].find((item) => item.messageId && item.messageId === action.messageId)
     ?? [...pendingQuestions.values()].find((item) => item.chatId === action.chatId && String(action.value?.c ?? '') === item.callId)
-  if (!pending) return { toast: { type: 'info', content: '这个问题已经结束。' } }
+  if (!pending) {
+    // An approval card is a different family: `a: 'allow' | 'deny'`, matched by the
+    // card message id. Falling through to the question lookup first keeps the exit
+    // path "already finished" honest for both kinds.
+    const approvalValue = action.value?.a
+    if (approvalValue === 'allow' || approvalValue === 'deny') {
+      return settleApprovalCard(ctx, config, action, approvalValue)
+    }
+    return { toast: { type: 'info', content: '这个问题已经结束。' } }
+  }
   if (pending.chatId && action.chatId && action.chatId !== pending.chatId) return undefined
   // Each step owns its own card; a click on an earlier (or already answered)
   // card must not touch the question that is live now.
