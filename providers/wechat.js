@@ -550,6 +550,10 @@ export function createWechatProvider(config = {}, deps = {}) {
     if (!intervalMs) return
     const timer = setInterval(() => {
       void (async () => {
+        // A turn waiting for permission is not producing tokens; renewing the
+        // indicator would show progress that does not exist. Skip this beat only —
+        // cancelling would drop the indicator for the rest of the turn.
+        if (deps.isBlocked?.() === true) return
         const renewal = await typing(settingsOf(), userId, contextToken, TYPING_ON)
         if (renewal.ok) return
         typingTickets.delete(userId)

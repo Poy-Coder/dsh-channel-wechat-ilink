@@ -2656,8 +2656,35 @@ export async function statusText(ctx, config, chatId) {
     `入站：${inbound.ready ? '已就绪' : `未就绪${inbound.error ? `（${inbound.error}）` : ''}`}`,
     `目标群：${chatId || settings.defaultChatId || '(无)'}`,
     `问答：${config.questionCards === false ? '关闭' : '开启'}${pendingQuestions.size > 0 ? `（等待回答 ${pendingQuestions.size}）` : ''}`,
+    `审批：${config.approvalPrompts === false ? '关闭' : '开启'}${pendingApprovals.size > 0 ? `（等待批准 ${pendingApprovals.size}）` : ''}`,
     `提供方：${provider().id}`,
+    ...(siblingBindingWarning(config, sessionId) ? [siblingBindingWarning(config, sessionId)] : []),
   ].join('\n')
+}
+
+/**
+ * Two channels bound to one Session is a configuration conflict, not a feature.
+ *
+ * Each channel answers every turn it sees, so both would post an answer to the same
+ * chat, and whichever writes last wins. Nothing in either plugin prevents it,
+ * because the binding lives in the channel's own state file — so the status report
+ * is where it can be surfaced honestly.
+ * @returns {string} a warning line, or ''
+ */
+function siblingBindingWarning(config, sessionId) {
+  const mine = String(channelProfile(config).id ?? '')
+  if (!sessionId || !mine) return ''
+  for (const [id, profile] of Object.entries(CHANNEL_PROFILES)) {
+    if (id === mine) continue
+    try {
+      const path = join(dshHomeDir(), `${profile.fileSlug}-channel-state.json`)
+      const other = JSON.parse(readFileSync(path, 'utf8'))
+      if (String(other?.sessionId ?? '') === sessionId) {
+        return `⚠️ 会话冲突：${profile.label}通道也绑定在同一个会话上，两条通道会各自回一遍。请让其中一个 /new 换会话。`
+      }
+    } catch { /* the other channel is not installed or has no state */ }
+  }
+  return ''
 }
 
 /**
@@ -2916,6 +2943,23 @@ export async function handleInboundEvent(ctx, config, data, seen) {
   if (consumeApprovalTextAnswer(ctx, config, { chatId, senderId, text })) {
     markSeen()
     return
+  }
+
+  // An approval and a pending question can both wait in one chat. The approval owns
+  // the reply (it blocks the whole turn), so an unmatched message must not be
+  // consumed by the question — it would either answer the wrong thing or be fed to
+  // the model as a stray digit. Tell the user which decision is outstanding.
+  if (pendingApprovals.size > 0) {
+    const waitingQuestion = [...pendingQuestions.values()].find((item) => item.chatId === chatId && !item.done)
+    if (waitingQuestion) {
+      void sendChannelText(
+        config,
+        chatId,
+        '还有一条审批在等你：点卡片上的「允许这一次 / 拒绝」，或回复 1 允许、2 拒绝。处理完再回答刚才的问题。',
+      ).catch(() => {})
+      markSeen()
+      return
+    }
   }
 
   // A pending question owns the next reply in its chat: a numbered, labelled or
@@ -3873,7 +3917,10 @@ export async function answerApproval(ctx, config, request, next) {
 export function parseApprovalAnswer(text) {
   const answer = String(text ?? '').trim()
   if (!answer) return undefined
-  if (/^(1|y|yes|ok|允许|同意|可以|好|批准|行)$/i.test(answer)) return 'allow'
+  // `好` / `行` / `ok` are deliberately absent: while an approval is pending they are
+  // the most likely thing a person types while thinking out loud ("好，那你说说看"),
+  // and reading that as permission would grant a tool call nobody approved.
+  if (/^(1|y|yes|允许|同意|可以|批准)$/i.test(answer)) return 'allow'
   if (/^(2|n|no|拒绝|不行|不允许|否|取消|别)$/i.test(answer)) return 'deny'
   return undefined
 }
@@ -4443,6 +4490,9 @@ export function apply(ctx, config = {}) {
   activeProvider = resolveProvider({ ...config, workspacePath: workspacePathFor(config) }, {
     log: (record) => logInbound(config, record),
     credentials: typeof ctx.get === 'function' ? ctx.get('credentials') : undefined,
+    // A turn blocked on an approval is not generating anything, so the transport
+    // must stop renewing its "typing" indicator while the chat is deciding.
+    isBlocked: () => pendingApprovals.size > 0,
   })
   const previousRun = readRuntimeMarker(config)
   const runtimeVersion = dshRuntimeVersion()
