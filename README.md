@@ -11,18 +11,49 @@
 
 ## 安装
 
-1. 扫码登录并写出凭据：`node scripts/wechat-login.mjs --qr`（二维码直接画在终端，并落一张 PNG；也可发到飞书扫码）。
-2. 在 profile 的 `cordis.patch.yml` 里加一行（安装 bundle 时会自动插入）：
-
-```yaml
-- id: wechat-channel
-  name: "dsh-channel-wechat-ilink"
-  config:
-    provider: wechat
-    inboundEnabled: false   # 默认关；开启前先确认下面三个安全项
-    sessionMode: create
-    workspacePath: ""   # 空 = <非系统盘>/dsh/wechat
+```bash
+dsh plugin add dsh-channel-wechat-ilink
 ```
+
+或从 GitHub 仓库 / Release（内容一致）：
+
+```bash
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.16/dsh-channel-wechat-ilink-0.1.16.tgz
+```
+
+依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。
+
+## 第一次安装：五步
+
+1. **装插件**（上面那条 `dsh plugin add`）。这一步只是把代码装进来，还没有登录微信。
+
+2. **扫码登录**，让插件拿到机器人 token。命令要在**插件目录**里跑——`dsh plugin add` 之后它就在 profile 的 `node_modules` 下：
+
+   ```bash
+   cd ~/.dsh/profiles/<你的 profile>/node_modules/dsh-channel-wechat-ilink
+   node scripts/wechat-login.mjs --qr
+   ```
+
+   - 终端会直接画出二维码（同时落一张 PNG），用手机微信扫；
+   - 成功后 token 写进 `~/.dsh/wechat-channel.json`（权限 0600），扫码的那个微信号同时被记为通道 owner；
+   - 想确认之前登录过没有：`node scripts/wechat-login.mjs --status`。
+
+3. **把入站打开**：在 profile 的 `cordis.patch.yml` 找到 `wechat-channel` 那行，把 `inboundEnabled: false` 改成 `true`。
+
+   > 不改这一行，重启后就是「装好了但没在听」：你发消息不会有任何反应——**而且因为微信要求你先发过消息、插件才能主动推送，它连一句提醒都发不出来**。这是首次安装最容易卡住的一步。
+   >
+   > 这一行的其余字段（`sessionMode`、`workspacePath` 等）装 bundle 时会自动插入，通常不用手写。
+
+4. **重启 DSH**（插件在启动时加载，没有热更新）。
+
+5. **在微信里给这个机器人发一句话**，预期看到：
+   - 你的消息立刻出现「对方正在输入…」；
+   - 几秒到几十秒后收到**一条完整的文字回答**；
+   - DSH 左侧会话列表里多出一条新会话（装了 [`dsh-im-indicator`](https://github.com/Poy-Coder/dsh-im-indicator) 的话，那一行还有「微信」胶囊和状态点）。
+
+   完全没有反应时，先确认第 3 步的 `inboundEnabled` 真的是 `true`，再看 `~/.dsh/wechat-inbound.log` 有没有新行——**入站关着的时候，连日志都不会写**。
+   如果日志里有 `inbound/delivered` 但聊天窗口没收到回答，发 `/status` 看会话、权限与模型状态。
 
 ### 开启入站前先看这三个默认值
 
@@ -31,8 +62,6 @@
 | `inboundEnabled` | `false` | 打开后，能给它发消息的人就能驱动本地 Agent |
 | `allowedUsers` | `[]` | 空不是"谁都可以"：扫码登录的那个微信号会**自动绑定**为 owner，其他人被拒；要加人再显式列出 |
 | `permissionPreset` / `applyPermissionPreset` | `workspace-write` / `true` | 通道工作区里的会话只允许写工作区内；越界写会请求批准，而 IM 里没人能点，所以那一轮会停住而不是悄悄提权。确实需要「越界也自动写」时显式改 `danger-full-access` |
-
-3. **重启 DSH**（插件在启动时加载，没有热更新）。
 
 ## 怎么用
 
