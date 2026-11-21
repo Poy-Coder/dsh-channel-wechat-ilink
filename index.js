@@ -4012,14 +4012,8 @@ export async function answerUserQuestion(ctx, config, request, next) {
  * @param {'allow' | 'deny'} verdict
  */
 function settleApprovalCard(ctx, config, action, verdict) {
-  const byMessage = [...pendingApprovals.values()].find((item) => item.messageId && item.messageId === action.messageId)
-  const pending = byMessage ?? [...pendingApprovals.values()].find((item) => item.chatId === action.chatId && !item.done)
-  logInbound(config, {
-    event: 'card', result: 'approval-click',
-    matched: byMessage ? 'message-id' : pending ? 'chat' : 'none',
-    verdict, messageId: action.messageId, chatId: action.chatId,
-    inFlight: [...pendingApprovals.values()].map((item) => ({ messageId: item.messageId ?? '', done: item.done })),
-  })
+  const pending = [...pendingApprovals.values()].find((item) => item.messageId && item.messageId === action.messageId)
+    ?? [...pendingApprovals.values()].find((item) => item.chatId === action.chatId && !item.done)
   if (!pending || pending.done) {
     return { toast: { type: 'info', content: '这次审批已经结束。' } }
   }
@@ -4036,20 +4030,7 @@ function settleApprovalCard(ctx, config, action, verdict) {
 
 export async function handleQuestionCardAction(ctx, config, raw) {
   const action = provider().normalizeCardAction(raw)
-  if (!action) {
-    logInbound(config, { event: 'card', result: 'unparsed', level: 'warn' })
-    return undefined
-  }
-  // Diagnostic: a click that reaches this point but never settles an approval is
-  // the difference between "the callback did not arrive" and "the callback arrived
-  // and matched nothing"; the two need different fixes.
-  logInbound(config, {
-    event: 'card', result: 'action-received',
-    messageId: action.messageId, chatId: action.chatId,
-    value: JSON.stringify(action.value ?? {}),
-    operatorId: action.operatorId,
-    pendingApprovals: pendingApprovals.size, pendingQuestions: pendingQuestions.size,
-  })
+  if (!action) return undefined
   const allowed = allowedUsersOf(config)
   if (allowed.length > 0 && action.operatorId && !allowed.includes(action.operatorId)) {
     logInbound(config, {

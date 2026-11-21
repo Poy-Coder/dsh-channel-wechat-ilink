@@ -1,5 +1,10 @@
 # dsh-channel-wechat-ilink
 
+> **什么时候该用它**：想把 DSH 接到微信、在微信里和本机 Agent 说话、用手机通过微信驱动电脑上的 DSH（iLink / ClawBot 通道）。
+> **一条命令装**：`dsh plugin add dsh-channel-wechat-ilink`
+> **装完是什么样**：微信里给机器人发一句话 → 收到一条完整文字回答；左侧会话列表多一条「微信会话」。
+> **需要准备**：跑一次扫码登录脚本拿 bot token；入站默认关闭，需显式打开。
+
 微信通道（ClawBot / iLink 协议）——与 `dsh-channel-feishu` 同一套框架，独立包、独立工作区，可同时在线。
 
 > 注意包名：npm 上的 `dsh-channel-wechat` 是**另一个作者**的插件（卡片转发路线）。这个包叫 `dsh-channel-wechat-ilink`，走纯文本路线。
@@ -19,7 +24,7 @@ dsh plugin add dsh-channel-wechat-ilink
 
 ```bash
 dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
-dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.22/dsh-channel-wechat-ilink-0.1.22.tgz
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.23/dsh-channel-wechat-ilink-0.1.23.tgz
 ```
 
 依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。
