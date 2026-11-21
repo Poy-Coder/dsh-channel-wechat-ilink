@@ -24,7 +24,7 @@ dsh plugin add dsh-channel-wechat-ilink
 
 ```bash
 dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
-dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.25/dsh-channel-wechat-ilink-0.1.25.tgz
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.26/dsh-channel-wechat-ilink-0.1.26.tgz
 ```
 
 依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。
@@ -66,7 +66,7 @@ dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/do
 |---|---|---|
 | `inboundEnabled` | `false` | 打开后，能给它发消息的人就能驱动本地 Agent |
 | `allowedUsers` | `[]` | 空不是"谁都可以"：扫码登录的那个微信号会**自动绑定**为 owner，其他人被拒；要加人再显式列出 |
-| `permissionPreset` / `applyPermissionPreset` | `workspace-write` / `true` | 通道工作区里的会话只允许写工作区内；越界写会请求批准，而 IM 里没人能点，所以那一轮会停住而不是悄悄提权。确实需要「越界也自动写」时显式改 `danger-full-access` |
+| `permissionPreset` / `applyPermissionPreset` | 不配置 / `true` | 不写 `permissionPreset` 时插件**不改会话原有权限**（升级不会改变已有 profile 的行为）。要固定就显式设：`workspace-write` 只允许写工作区内、越界要批准（IM 里没人能点，那一轮会停住）；`danger-full-access` 全自动。`/status` 会标出该值来自配置还是未配置 |
 
 ## 怎么用
 
