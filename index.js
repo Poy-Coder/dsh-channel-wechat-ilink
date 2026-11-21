@@ -96,8 +96,8 @@ export const Config = z.object({
   thinking: z.boolean().default(true).description('Show the native thinking process (reasoning and tool calls) during a turn.'),
   thinkingHidden: z.boolean().default(false).description('Hide the thinking process once the turn finishes.'),
   reactions: z.boolean().default(true).description('Acknowledge an inbound message with a reaction while the turn runs.'),
-  permissionPreset: z.string().default('workspace-write')
-    .description('Permission preset applied to sessions in this channel\u2019s workspace. The default confines writes to the workspace; a channel turn is unattended, so an out-of-workspace action waits for an approval nobody can click in the chat — set danger-full-access only when you accept that trade.'),
+  permissionPreset: z.string().default('')
+    .description('Permission preset forced on this channel\'s sessions, e.g. workspace-write or danger-full-access. Empty (the default) leaves the session policy alone — set it explicitly, because a schema default that changes between versions silently downgrades existing profiles.'),
   applyPermissionPreset: z.boolean().default(true).description('Turn the permission preset switch off.'),
   region: z.union([z.const('feishu'), z.const('lark')]).default('feishu').description('Feishu China or Lark international.'),
   appId: z.string().default('').description('Optional app id; prefer the credentials store or credentials file.'),
@@ -1434,7 +1434,7 @@ const statusTool = (config) => ({
       streamingCards: config.streamingCards !== false,
       permissionPreset: config.applyPermissionPreset === false
         ? ''
-        : String(config.permissionPreset ?? 'workspace-write'),
+        : String(config.permissionPreset ?? ''),
       inboundReady: Boolean(inbound.ready),
       inboundTransport: String(inbound.transport ?? ''),
       inboundError: String(inbound.error ?? ''),
@@ -1578,12 +1578,15 @@ export async function attachToFeishuWorkspace(ctx, config, sessionId) {
 /**
  * Apply the channel's permission preset to a session the channel will drive.
  *
- * The default is `workspace-write`: writes stay inside the workspace, which is
- * what an IM turn usually needs. The preset also carries `approval: ask`, and a
- * channel turn has nobody in front of the GUI — an out-of-workspace action waits
- * for an approval the chat cannot answer, so that turn ends stalled rather than
- * silently elevated. `danger-full-access` removes the prompt and the confinement
- * together; a deployment that needs unattended out-of-workspace writes opts into
+ * The default is "not configured": the session keeps whatever policy it already has.
+ * A schema default here would be a policy change nobody signed up for — 0.9.35 made
+ * it `workspace-write` and silently downgraded every existing profile. When it IS
+ * configured, `workspace-write` is the right value for an unattended IM turn: writes
+ * stay inside the workspace, and the preset also carries `approval: ask`, so an
+ * out-of-workspace action waits for an approval the chat cannot answer — that turn
+ * ends stalled rather than silently elevated. `danger-full-access` removes the prompt
+ * and the confinement together; a deployment that needs unattended out-of-workspace
+ * writes opts into
  * it explicitly instead of getting it by default.
  *
  * `set()` records the switch durably and is a no-op when the knobs already match,
@@ -1593,8 +1596,13 @@ export async function attachToFeishuWorkspace(ctx, config, sessionId) {
  * `target` may be an Agent (its `session`) or a Session.
  */
 function applyPermissionPreset(ctx, config, target) {
-  const name = String(config.permissionPreset ?? 'workspace-write').trim()
-  if (!name || config.applyPermissionPreset === false) return false
+  if (config.applyPermissionPreset === false) return false
+  // Empty means "not configured": leave the session's own policy alone. A schema
+  // default here is dangerous — 0.9.35 changed it from danger-full-access to
+  // workspace-write, and every existing profile that never set it was downgraded
+  // silently, with no log and no way to see the effective value.
+  const name = String(config.permissionPreset ?? '').trim()
+  if (!name) return false
   const session = target?.session ?? target
   if (!session?.id) return false
   try {
@@ -2695,9 +2703,12 @@ export async function statusText(ctx, config, chatId) {
     const snapshot = ctx?.get?.('sessionTitle')?.get?.(agent?.session)
     title = String(snapshot?.title ?? '')
   } catch { /* title is optional */ }
+  const configuredPreset = String(config.permissionPreset ?? '').trim()
   const preset = config.applyPermissionPreset === false
     ? '(按会话自身策略)'
-    : String(config.permissionPreset ?? 'workspace-write')
+    : configuredPreset
+      ? `${configuredPreset}（来源：配置）`
+      : '(未配置——沿用会话自身策略；要固定就写 permissionPreset)'
   return [
     `会话：${sessionId || '(未配置)'}`,
     ...(title ? [`标题：${title}`] : []),
