@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
 import { resolveProvider, providerIds } from './providers/registry.js'
-import { credentialsFilePath } from './providers/feishu.js'
+import { CARD_ELEMENT_ID, credentialsFilePath } from './providers/feishu.js'
 
 // Transport helpers stay importable from the package entry so tests and other
 // callers did not have to move when the adapter was split out.
@@ -468,6 +468,18 @@ async function ensureCard(record, ctx, config) {
       record.card = { cardId: created.cardId, messageId: created.messageId, sequence: 1 }
       record.lastCardText = text
       record.lastSentAt = Date.now()
+      // Remember the card on disk too: if the process dies mid-turn, the next start
+      // can close that card instead of leaving 「思考中…」 on screen forever.
+      writeRuntimeMarker(config, {
+        activeTurn: {
+          sessionId: record.sessionId,
+          turn: record.turn,
+          at: Date.now(),
+          cardId: created.cardId,
+          messageId: created.messageId,
+          chatId,
+        },
+      })
       logInbound(config, {
         event: 'card', result: 'created', sessionId: record.sessionId, turn: record.turn,
         cardId: created.cardId, messageId: created.messageId, chatId,
@@ -1913,6 +1925,44 @@ async function notifyProblem(config, { key, title, detail, chatId, minIntervalMs
 }
 
 /**
+ * Replace a card left behind by a dead run with a settled one.
+ *
+ * A killed process cannot finish its streaming card, so the chat keeps showing
+ * 「思考中… 已调用 2 个工具 · 已用时 30s」 — a spinner that will never move. The card id
+ * is on disk for exactly this case; rewriting it and closing streaming turns the
+ * frozen card into a record that says what happened.
+ */
+async function settleOrphanCard(config, active) {
+  const cardId = String(active?.cardId ?? '')
+  if (!cardId) return false
+  // Feishu takes an int32 sequence and rejects epoch milliseconds (9499 "Invalid
+  // parameter type ... Sequence"). The dead run's counter is small, so any large
+  // in-range value still orders after it.
+  const sequence = Math.floor(Date.now() % 1_000_000_000)
+  try {
+    // Element-level rewrite, not a full-card replace: CardKit answers a full replace
+    // on a streaming card with 200610 "body is nil" (the approval card's replace path
+    // hits the same wall and falls back). The element update is the call that works.
+    await provider().card.update({
+      cardId,
+      sequence,
+      elementId: CARD_ELEMENT_ID,
+      content: '**这一轮被中断了**\n\n进程在回答中途退出，这条卡片不会再有更新。把消息重发一次即可继续。',
+    })
+  } catch (error) {
+    logInbound(config, { event: 'card', result: 'orphan-settle-failed', reason: errorText(error) })
+    return false
+  }
+  try {
+    await provider().card.close({ cardId, sequence: sequence + 1 })
+  } catch (error) {
+    logInbound(config, { event: 'card', result: 'orphan-close-failed', reason: errorText(error) })
+  }
+  logInbound(config, { event: 'card', result: 'orphan-settled', sessionId: String(active?.sessionId ?? ''), turn: Number(active?.turn ?? 0) })
+  return true
+}
+
+/**
  * Explain, on the next start, that the previous run died mid-turn.
  *
  * A process killed while an answer was streaming leaves `activeTurn` in the
@@ -1925,6 +1975,7 @@ async function reportPreviousCrash(config, previous) {
   const turn = Number(active.turn)
   const at = Number(active.at ?? previous.updatedAt ?? 0)
   const stamp = at ? new Date(at).toLocaleString('zh-CN', { hour12: false }) : ''
+  await settleOrphanCard(config, active)
   return await notifyProblem(config, {
     key: 'crash',
     title: '上次运行在半途退出了',
