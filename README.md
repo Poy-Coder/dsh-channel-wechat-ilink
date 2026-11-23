@@ -24,7 +24,7 @@ dsh plugin add dsh-channel-wechat-ilink
 
 ```bash
 dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink
-dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.26/dsh-channel-wechat-ilink-0.1.26.tgz
+dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/download/v0.1.27/dsh-channel-wechat-ilink-0.1.27.tgz
 ```
 
 依赖必须用扁平结构装（非 ASCII 目录下 pnpm 的软链会把路径写坏）：`pnpm install --node-linker=hoisted`。
@@ -86,6 +86,7 @@ dsh plugin add https://github.com/Poy-Coder/dsh-channel-wechat-ilink/releases/do
 |---|---|
 | `/help` | 命令列表 |
 | `/status` | 当前会话、工作区、权限、入站状态 |
+| `/why` | 这一轮在做什么、是否正常（一句话；长任务期间随时可问，首条进度会提醒） |
 | `/new [内容]` | 开一段新会话（带内容则作为第一条消息） |
 | `/rename <标题>` | 给当前会话改名 |
 | `/stop` | 中断进行中的回合 |

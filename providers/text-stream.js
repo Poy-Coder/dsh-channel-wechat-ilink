@@ -191,14 +191,24 @@ export function createTextStream({ limits = TEXT_STREAM_LIMITS, now = () => Date
     // The gap only applies between bubbles; the first one is due as soon as the
     // turn has been silent long enough.
     if (state.progressSent > 0 && now() - state.progressSentAt < limits.progressGapMs) return
-    // The same "思考中… · 已用时 Ns" ticker must not repeat: only a changed
-    // status (a different tool, a new count) is worth a bubble.
-    const key = text.replace(/已用时 \d+s?/g, '')
-    if (key === state.lastProgressKey) return
+    // The same "思考中… · 已用时 Ns" ticker must not repeat every gap — but it may
+    // repeat once per gap, because a turn that is still thinking after 210 s and
+    // 390 s is otherwise indistinguishable from a dead one. The earlier version
+    // suppressed every repeat, so a long turn produced exactly one bubble at 30 s
+    // and silence afterwards.
+    const key = text.replace(/已用时 \d+s?/g, '').replace(/输入 \/why 查看实时状态/g, '').trim()
+    if (key === state.lastProgressKey && now() - state.progressSentAt < limits.progressGapMs) return
+    const first = state.progressSent === 0
     state.progressSent += 1
     state.progressSentAt = now()
     state.lastProgressKey = key
-    actions.push({ kind: 'send', tag: 'progress', text: progressBubble(text) })
+    // The first bubble of a turn always names `/why`. A turn that is busy calling
+    // tools never reaches the "nothing to report" branch, so without this the command
+    // stays undiscoverable for exactly the users who need it most. Later bubbles stay
+    // terse — repeating the hint three times a turn is noise, not discovery.
+    let bubble = progressBubble(text)
+    if (first && !/\/why/.test(bubble)) bubble = `${bubble} · /why 看状态`
+    actions.push({ kind: 'send', tag: 'progress', text: bubble })
   }
 
   const push = (content) => {

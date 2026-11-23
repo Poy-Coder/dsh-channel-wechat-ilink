@@ -401,11 +401,51 @@ export function progressText(record, now = Date.now()) {
   const lines = [THINKING_TEXT]
   const seconds = Math.max(0, Math.round((now - (record?.startedAt ?? now)) / 1000))
   const meta = []
+  // What the user can act on: which tool is running, how many ran, how long it has
+  // been. A live card is already on screen, so no "type /why" pointer here — that
+  // belongs to plain-text channels, which only get one bubble every few minutes.
   if (record?.activity) meta.push(`正在执行 ${record.activity}`)
   if ((record?.toolSteps ?? 0) > 0) meta.push(`已调用 ${record.toolSteps} 个工具`)
   if (seconds >= 5) meta.push(`已用时 ${seconds}s`)
   if (meta.length > 0) lines.push('', `<font color="grey">${meta.join(' · ')}</font>`)
   return lines.join('\n')
+}
+
+/**
+ * One line answering "why has nothing come back yet".
+ *
+ * Deliberately terse: the two things a waiting person wants are what it is doing and
+ * whether anything is wrong. Everything else (queue depth, retry counts, session ids)
+ * belongs in `/status` and the log, not in a chat bubble.
+ */
+export function whyText(config, sessionId, now = Date.now()) {
+  const record = liveTurnOf(sessionId)
+  if (!record) return '当前没有正在跑的回合 · 正常'
+  const seconds = Math.max(0, Math.round((now - (record.startedAt ?? now)) / 1000))
+  const what = record.activity
+    ? `正在执行 ${record.activity}`
+    : record.phase === 'answering' ? '正在输出回答' : '正在思考'
+  return `${what} · ${seconds}s · ${whyNote(config, sessionId, record)}`
+}
+
+/** The live turn record of one session, if a turn is running. */
+function liveTurnOf(sessionId) {
+  if (!sessionId) return undefined
+  let latest
+  for (const record of turns.values()) {
+    if (record.sessionId !== sessionId) continue
+    if (record.closed) continue
+    if (!latest || Number(record.turn ?? 0) > Number(latest.turn ?? 0)) latest = record
+  }
+  return latest
+}
+
+/** `正常`, or the one thing that is actually wrong. */
+function whyNote(config, sessionId, record) {
+  if ([...pendingApprovals.values()].some((item) => item.sessionId === sessionId && !item.done)) return '等待你的批准'
+  if ([...pendingQuestions.values()].some((item) => item.sessionId === sessionId && !item.done)) return '等待你的回答'
+  if (record?.cardFailed) return '卡片发送失败，已改用文字'
+  return '正常'
 }
 
 /** The text a card/text reply should carry right now: committed steps + live deltas. */
@@ -2551,6 +2591,7 @@ const HELP_TEXT = [
   '可用命令：',
   '/help — 这条说明',
   '/status — 当前会话、工作区、权限与入站状态',
+  '/why — 这一轮在做什么、是否正常（一句话）',
   '/new [内容] — 开一段新会话（带内容则作为第一条消息）',
   '/rename <标题> — 给当前会话改名',
   '/stop — 中断进行中的回合',
@@ -2785,6 +2826,12 @@ export async function handleSlashCommand(ctx, config, { name, args, chatId, send
     case 'status':
       await reply(await statusText(ctx, config, chatId))
       log('status')
+      return true
+
+    case 'why':
+      // Answered out of band (before the model), so it works while a turn runs.
+      await reply(whyText(config, activeSessionId(config)))
+      log('why')
       return true
 
     case 'stop': {
