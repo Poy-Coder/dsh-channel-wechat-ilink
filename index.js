@@ -1867,6 +1867,33 @@ const RECONCILE_WINDOW_MS = 30 * 60_000
 // While connected, poll the history on this cadence: a deaf socket produces no
 // ready edge, and only a pull can tell that messages are piling up unseen.
 const RECONCILE_INTERVAL_MS = 2 * 60_000
+/** Quiet-period probe: still catches a deaf socket, at a fraction of the quota. */
+const RECONCILE_WARM_MS = 10 * 60_000
+const RECONCILE_COLD_MS = 30 * 60_000
+/** Idle time after which the chat stops counting as active. */
+const RECONCILE_ACTIVE_IDLE_MS = 10 * 60_000
+const RECONCILE_WARM_IDLE_MS = 60 * 60_000
+
+/**
+ * How long to wait before the next catch-up poll.
+ *
+ * The poll exists to notice a socket that answers pings but delivers nothing, and it
+ * costs one base-API call each time. A fixed 2-minute cadence spends 21,600 calls a
+ * month against a 10,000-call free/standard tenant (issue #6), so the interval follows
+ * how likely the chat is to produce a message: active → 2 min, warm → 10, cold → 30.
+ *
+ * @param {number} lastInboundAt timestamp of the last accepted inbound message
+ * @param {number} now
+ * @returns {number} milliseconds
+ */
+export function nextReconcileDelay(lastInboundAt, now = Date.now()) {
+  const last = Number(lastInboundAt ?? 0)
+  if (!last) return RECONCILE_COLD_MS
+  const idle = Math.max(0, now - last)
+  if (idle < RECONCILE_ACTIVE_IDLE_MS) return RECONCILE_INTERVAL_MS
+  if (idle < RECONCILE_WARM_IDLE_MS) return RECONCILE_WARM_MS
+  return RECONCILE_COLD_MS
+}
 const IDLE_PROBE_MS = 2_000
 
 /**
@@ -1891,6 +1918,15 @@ const RUNTIME_HEARTBEAT_MS = 5 * 60_000
 /** The one plugin-owned live agent, activated on demand for the inbound session. */
 let ownedHandle
 let lastInboundAt = 0
+
+/**
+ * Catch-up poll accounting, shown in `/status`.
+ *
+ * The poll spends base-API calls, and a free/standard Feishu tenant allows 10,000 a
+ * month; without a visible counter the first symptom of overspend is every call
+ * failing at once. `count` resets at local midnight.
+ */
+const reconcileState = { count: 0, dayStart: 0, delay: 0 }
 
 /** Inbound transport state, reported by `feishu_channel_status` and the log. */
 let inboundState = { ready: false, error: '', at: 0, transport: '' }
@@ -2887,6 +2923,7 @@ export async function statusText(ctx, config, chatId) {
     `审批：${config.approvalPrompts === false ? '关闭' : '开启'}${pendingApprovals.size > 0 ? `（等待批准 ${pendingApprovals.size}）` : ''}`,
     `提供方：${provider().id}`,
     ...(updateNotice(versionState) ? [updateNotice(versionState)] : []),
+    `补拉：今日 ${reconcileState.count} 次 · 当前间隔 ${Math.round(Number(reconcileState.delay ?? 0) / 60_000) || 0} 分钟`,
     ...(siblingBindingWarning(config, sessionId) ? [siblingBindingWarning(config, sessionId)] : []),
   ].join('\n')
 }
@@ -4511,10 +4548,16 @@ function startInbound(ctx, config) {
       // reconnect, ask the API what was said while we were away and deliver
       // anything we never saw — the only way to actually not lose a message.
       let reconcileTimer
-      let reconcileInterval
       const reconcile = async () => {
         if (disposed) return
         if (typeof provider().listRecentMessages !== 'function') return
+        // Count what this poll actually spends: one base-API call per run.
+        const dayStart = new Date().setHours(0, 0, 0, 0)
+        if (reconcileState.dayStart !== dayStart) {
+          reconcileState.dayStart = dayStart
+          reconcileState.count = 0
+        }
+        reconcileState.count += 1
         // The row rarely carries a chat id: the credential file does. Falling
         // back to it is what makes the catch-up run at all.
         let chatId = String(config.defaultChatId ?? '').trim()
@@ -4553,24 +4596,35 @@ function startInbound(ctx, config) {
           since,
         })
       }
-      const scheduleReconcile = () => {
+      // A reconnect can "recover" onto a socket that answers pings but never
+      // delivers another event: no further ready edge fires, so the catch-up that
+      // hangs off that edge would never run again. A slow poll closes that hole; the
+      // message-id dedupe keeps already answered messages from coming back.
+      //
+      // The cadence follows activity instead of a fixed interval. At 2 minutes flat
+      // this poll alone spends 21,600 calls a month, and a free/standard Feishu tenant
+      // allows 10,000 — fourteen days before every API call starts failing (issue #6).
+      // While the user is actually chatting the interval stays short; while the chat is
+      // cold a 30-minute probe is enough to notice a deaf socket.
+      const scheduleReconcile = (delay = 5_000) => {
         if (reconcileTimer || disposed) return
+        reconcileState.delay = delay
         reconcileTimer = setTimeout(() => {
           reconcileTimer = undefined
           void reconcile()
-        }, 5_000)
+          // Re-arm with the cadence that fits the chat right now. Only Feishu backs off:
+          // its base-API quota is documented and shared per tenant, while WeChat's
+          // cold-read is already rate-limited inside the provider and its catch-up
+          // should not get slower than it is today.
+          if (disposed) return
+          const adaptive = channelProfile(config).id === 'feishu'
+          scheduleReconcile(adaptive
+            ? nextReconcileDelay(inboundSnapshot().lastInboundAt, Date.now())
+            : RECONCILE_INTERVAL_MS)
+        }, delay)
         reconcileTimer.unref?.()
       }
-      // A reconnect can "recover" onto a socket that answers pings but never
-      // delivers another event: no further ready edge fires, so the catch-up that
-      // hangs off that edge would never run again. A slow poll costs one REST call
-      // every couple of minutes and closes that hole; the message-id dedupe keeps
-      // already answered messages from coming back.
-      reconcileInterval = setInterval(() => {
-        if (disposed || !inboundSnapshot().ready) return
-        void reconcile()
-      }, RECONCILE_INTERVAL_MS)
-      reconcileInterval.unref?.()
+      scheduleReconcile()
       // A connection that stays down is a silent channel, but a blip that heals in
       // seconds is not news: the notice waits `CONNECTION_DOWN_NOTICE_MS` and only
       // then explains what happened. A recovered connection reports only when that
@@ -4680,7 +4734,7 @@ function startInbound(ctx, config) {
         disposed = true
         clearInterval(releaseTimer)
         clearInterval(pendingTimer)
-        clearInterval(reconcileInterval)
+        clearTimeout(reconcileTimer)
         clearConnectionWatch()
         try { offSessionEvent?.() } catch { /* ignore */ }
         try { offInbox?.() } catch { /* ignore */ }
