@@ -10,7 +10,7 @@
  *   node scripts/wechat-login.mjs --status   # read the saved credential
  */
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -107,6 +107,12 @@ async function showQr(qr) {
 }
 
 async function main() {
+  // Agent-facing split, same shape as the Feishu script: an agent cannot hold a turn
+  // open for five minutes while a person finds their phone, so `--begin` starts a run and
+  // exits, and `--poll` checks it in a later call.
+  if (process.argv.includes('--begin')) { await beginRun(); return }
+  if (process.argv.includes('--poll')) { await pollRun(); return }
+
   let qr = await fetchQr()
   await showQr(qr)
   console.log('WAITING_FOR_SCAN')
@@ -150,6 +156,87 @@ async function main() {
   }
   console.log('LOGIN_FAILED:timeout')
   process.exit(1)
+}
+
+/** Where an in-flight scan is remembered, so `--begin` and `--poll` can be two calls. */
+const PENDING_PATH = join(dirname(STATE_PATH), 'wechat-login-pending.json')
+
+/** `--begin`: fetch a QR, render the PNG, record the run, exit. Never waits. */
+async function beginRun() {
+  const qr = await fetchQr()
+  const rendered = await renderQr(qr.url, { out: join(dirname(STATE_PATH), 'wechat-qr.png') })
+  const png = typeof rendered === 'string' ? rendered : String(rendered?.png ?? '')
+  mkdirSync(dirname(PENDING_PATH), { recursive: true })
+  writeFileSync(PENDING_PATH, `${JSON.stringify({
+    qrcode: qr.qrcode,
+    url: qr.url,
+    qrImage: png,
+    startedAt: Date.now(),
+    // iLink's QR lives about five minutes; the marker only guards a stale file.
+    expiresAt: Date.now() + 5 * 60_000,
+  }, null, 2)}\n`, { mode: 0o600 })
+
+  console.log(JSON.stringify({
+    state: 'started',
+    url: qr.url,
+    qrImage: png,
+    expiresInMinutes: 5,
+    next: '把 qrImage 发给用户（微信不在本机时只发 url 没用，需要图片），确认后运行 --poll',
+  }, null, 2))
+}
+
+/** `--poll`: check the remembered run once. 0 = logged in, 2 = still waiting, 1 = failed. */
+async function pollRun() {
+  let pending
+  try { pending = JSON.parse(readFileSync(PENDING_PATH, 'utf8')) } catch {
+    console.log(JSON.stringify({ state: 'none', hint: '没有进行中的扫码，先运行 --begin' }))
+    process.exit(1)
+  }
+  if (Date.now() > Number(pending.expiresAt ?? 0)) {
+    try { unlinkSync(PENDING_PATH) } catch { /* gone */ }
+    console.log(JSON.stringify({ state: 'expired', hint: '二维码已过期，重新运行 --begin' }))
+    process.exit(1)
+  }
+
+  let status
+  try {
+    status = await get(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(pending.qrcode)}`)
+  } catch (error) {
+    console.log(JSON.stringify({ state: 'error', detail: String(error).slice(0, 200) }))
+    process.exit(1)
+  }
+  const kind = String(status?.status ?? 'wait')
+
+  if (kind === 'confirmed') {
+    if (!status.ilink_bot_id || !status.bot_token) {
+      console.log(JSON.stringify({ state: 'error', detail: 'missing bot id/token' }))
+      process.exit(1)
+    }
+    const saved = {
+      botToken: status.bot_token,
+      accountId: status.ilink_bot_id,
+      userId: status.ilink_user_id ?? '',
+      baseUrl: String(status.baseurl ?? BASE).trim() || BASE,
+      savedAt: new Date().toISOString(),
+    }
+    saveCredential(saved)
+    try { unlinkSync(PENDING_PATH) } catch { /* gone */ }
+    console.log(JSON.stringify({
+      state: 'success',
+      accountId: saved.accountId,
+      userId: saved.userId,
+      savedTo: STATE_PATH,
+      next: '在 profile 里打开 inboundEnabled，然后发一条微信消息',
+    }))
+    process.exit(0)
+  }
+  if (kind === 'expired') {
+    try { unlinkSync(PENDING_PATH) } catch { /* gone */ }
+    console.log(JSON.stringify({ state: 'expired', hint: '二维码已过期，重新运行 --begin' }))
+    process.exit(1)
+  }
+  console.log(JSON.stringify({ state: 'pending', raw: kind, hint: '还没确认；用户扫码后再运行一次 --poll' }))
+  process.exit(2)
 }
 
 main().catch((error) => {

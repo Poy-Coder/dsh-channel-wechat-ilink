@@ -16,12 +16,25 @@ bound as the owner automatically, and every other sender is refused.
 
 ## 2. Log in
 
-```bash
-node scripts/wechat-login.mjs --qr
-```
+**Your job is to finish this for the user, not to hand them a command to run.**
 
-Scan the rendered QR with WeChat. The token lands in `~/.dsh/wechat-channel.json`
-(0600). Never paste it into chat, a commit, or the patch file.
+1. `node scripts/wechat-login.mjs --begin` — prints JSON with `url`, `qrImage`,
+   `expiresInMinutes` (about 5). It does **not** wait.
+2. **Show the code yourself**, by what exists:
+   - **Web GUI, first install: the user has no channel yet — that is why they are
+     installing this one, so `wechat_send_file` does not exist.** Use `present` with the
+     `qrImage` path and give `url` as text too. `present` shows after the turn ends; the
+     user scans, then says so in the next turn.
+   - **An already working IM session**: send `qrImage` with the file tool.
+   - A terminal QR is invisible to someone talking to you in a chat.
+3. `node scripts/wechat-login.mjs --poll` — exit 0 = logged in and saved, exit 2 =
+   **still waiting, not an error**, exit 1 = failed or expired.
+4. Then continue: enable `inboundEnabled` in the profile row, restart, send a test
+   message, run §3.
+
+The token lands in `~/.dsh/wechat-channel.json` (0600). Never paste it into chat, a
+commit, or the patch file. `node scripts/wechat-login.mjs --qr` is the old
+print-and-wait form for a human at a terminal; agents should not use it.
 
 ## 3. Verify
 
