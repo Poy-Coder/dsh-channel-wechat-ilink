@@ -181,6 +181,43 @@ export async function sendTextMessage(base, token, { receiveId, receiveIdType, t
   }
 }
 
+/**
+ * Send a rich-text (`post`) message.
+ *
+ * Used when the answer travels as a native message instead of a card: `post` is the
+ * only native type that renders bold, links and code blocks, and unlike a card it can
+ * be forwarded, quoted and searched like any other message.
+ *
+ * @param {string} base API base URL
+ * @param {string} token tenant access token
+ * @param {{ receiveId: string, receiveIdType: string, post: object }} input
+ */
+export async function sendPostMessage(base, token, { receiveId, receiveIdType, post }, signal) {
+  const query = new URLSearchParams({ receive_id_type: receiveIdType })
+  const response = await fetch(`${base}/open-apis/im/v1/messages?${query.toString()}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      receive_id: receiveId,
+      msg_type: 'post',
+      content: JSON.stringify(post),
+    }),
+    signal,
+  })
+  const payload = await response.json().catch(() => undefined)
+  if (!response.ok || (payload?.code !== undefined && payload.code !== 0)) {
+    throw new Error(feishuError(payload, `Feishu post send failed (HTTP ${response.status})`))
+  }
+  return {
+    ok: true,
+    messageId: String(payload?.data?.message_id ?? ''),
+    chatId: String(payload?.data?.chat_id ?? (receiveIdType === 'chat_id' ? receiveId : '')),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Attachments
 //
@@ -802,6 +839,13 @@ export function createFeishuProvider(config = {}, deps = {}) {
       const resolved = await settingsAsync()
       return await sendTextMessage(resolved.baseUrl, await token(signal), {
         receiveId: chatId, receiveIdType: 'chat_id', text,
+      }, signal)
+    },
+
+    async sendRichText({ chatId, post }, signal) {
+      const resolved = await settingsAsync()
+      return await sendPostMessage(resolved.baseUrl, await token(signal), {
+        receiveId: chatId, receiveIdType: 'chat_id', post,
       }, signal)
     },
 

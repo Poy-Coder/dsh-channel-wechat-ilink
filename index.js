@@ -28,6 +28,8 @@ import z from '@deepseek-ai/schemastery'
 
 import { resolveProvider, providerIds } from './providers/registry.js'
 import { CARD_ELEMENT_ID, credentialsFilePath } from './providers/feishu.js'
+import { refreshVersionCache, updateNotice, versionCachePath } from './lib/update.js'
+import { splitForPost } from './providers/post.js'
 
 // Transport helpers stay importable from the package entry so tests and other
 // callers did not have to move when the adapter was split out.
@@ -78,6 +80,8 @@ export const Config = z.object({
   idleReleaseMinutes: z.number().default(30).description('Minutes of quiet before the plugin hands its agent back; 0 keeps it alive.'),
   notifyOnNew: z.boolean().default(true).description('Reply on the IM when /new creates a session.'),
   streamingCards: z.boolean().default(true).description('Stream answers into a card; off sends plain text.'),
+  answerMode: z.union([z.const('card'), z.const('native')]).default('card')
+    .description('card: the answer lives in the streaming card (default). native: the card shows only progress, and each step\'s answer goes out as a native rich-text message — copyable, searchable, forwardable, and never split mid-answer.'),
   textProgressSeconds: z.number().default(30)
     .description('Channels without editable messages (WeChat): seconds without answer text before one progress message is pushed; 0 disables progress messages. Raise it if 30s feels chatty.'),
   typingRenewSeconds: z.number().default(5)
@@ -131,8 +135,11 @@ let activeProvider
  * so a WeChat row never has to pretend it is Feishu.
  */
 const CHANNEL_PROFILES = {
-  feishu: { label: '飞书', fileSlug: 'feishu', workspaceName: 'dsh-feishu', sessionPrefix: '飞书会话', toolPrefix: 'feishu' },
-  wechat: { label: '微信', fileSlug: 'wechat', workspaceName: 'dsh-wechat', sessionPrefix: '微信会话', toolPrefix: 'wechat' },
+  // `publishName` is the npm name, which differs from the local package name: the
+  // repository package is `dsh-feishu-channel` while the published one is
+  // `dsh-channel-feishu`, and the version check must ask the registry for the latter.
+  feishu: { label: '飞书', fileSlug: 'feishu', workspaceName: 'dsh-feishu', sessionPrefix: '飞书会话', toolPrefix: 'feishu', publishName: 'dsh-channel-feishu' },
+  wechat: { label: '微信', fileSlug: 'wechat', workspaceName: 'dsh-wechat', sessionPrefix: '微信会话', toolPrefix: 'wechat', publishName: 'dsh-channel-wechat-ilink' },
 }
 
 export function channelProfile(config = {}) {
@@ -448,8 +455,54 @@ function whyNote(config, sessionId, record) {
   return '正常'
 }
 
+/**
+ * Deliver one step's answer as a native rich-text message.
+ *
+ * In `native` mode the card shows only progress, and the answer arrives as a normal
+ * message: copyable, searchable, forwardable, and never truncated at a card boundary.
+ * A multi-step turn therefore reads as several messages in order, which is exactly
+ * what a long task looks like to the person following it.
+ */
+async function sendNativeAnswer(ctx, config, record, text) {
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed) return false
+  const chatId = replyTargetOf(config, record.sessionId)
+  if (!chatId) return false
+  if (typeof provider().sendRichText !== 'function') return false
+  let delivered = 0
+  for (const post of splitForPost(trimmed)) {
+    try {
+      const sent = await provider().sendRichText({ chatId, post })
+      delivered += 1
+      logInbound(config, {
+        event: 'answer', result: 'sent', sessionId: record.sessionId, turn: record.turn,
+        mode: 'native', messageId: String(sent?.messageId ?? ''),
+      })
+    } catch (error) {
+      logInbound(config, {
+        event: 'answer', result: 'post-failed', sessionId: record.sessionId, turn: record.turn,
+        reason: errorText(error),
+      })
+      // One fallback, and only for a part that never landed: plain text is worse
+      // than a rich message but far better than silence.
+      try {
+        await provider().sendText({ chatId, text: plainTextFromMarkdown(trimmed) })
+        delivered += 1
+      } catch (fallbackError) {
+        warnTo(ctx, `native answer failed: ${errorText(fallbackError)}`)
+        return delivered > 0
+      }
+      break
+    }
+  }
+  return delivered > 0
+}
+
 /** The text a card/text reply should carry right now: committed steps + live deltas. */
 function replyText(record) {
+  // native answers leave the card to the progress line only: the answer itself is
+  // delivered as its own message the moment each step finishes.
+  if (record?.nativeAnswer) return progressText(record)
   const joined = answerTextOf(record)
   if (!joined) return record.phase === 'answering' ? '' : progressText(record)
   if (joined.length <= MAX_REPLY_CHARS) return joined
@@ -900,6 +953,50 @@ export async function finalizeTurn(ctx, config, sessionId, turn, reason) {
     return
   }
 
+  // native mode: every step already went out as its own message, so the card only
+  // closes itself — writing the progress line into it as "the answer" would be a lie.
+  if (record.nativeAnswer) {
+    if (failure) {
+      void notifyProblem(config, {
+        key: `turn:${sessionId}`,
+        title: '这一轮中途出错了',
+        detail: `会话 ${sessionId.slice(0, 22)} 第 ${turn} 轮：${failure}\n`
+          + '上面是出错前已经发出的部分，重发那条消息可以重试。',
+        chatId,
+      })
+    }
+    if (cardsOn && record.card) {
+      const card = record.card
+      try {
+        // Only the footer moves: writing an empty body is rejected by Feishu
+        // ("99992402 field validation failed"), which used to abort the whole close
+        // and leave the card frozen on 回复中.
+        await cardWrite(record, async () => {
+          card.sequence += 1
+          await provider().card.update({
+            cardId: card.cardId,
+            content: failure ? '<font color="grey">出错</font>' : '<font color="grey">完成</font>',
+            sequence: card.sequence,
+            elementId: 'note_1',
+          })
+          card.sequence += 1
+          await provider().card.close({
+            cardId: card.cardId,
+            sequence: card.sequence,
+            summary: failure ? '这一轮出错' : '已完成',
+          })
+        })
+        logInbound(config, {
+          event: 'card', result: 'closed', sessionId, turn, cardId: card.cardId,
+          updates: record.updates ?? 0, mode: 'native',
+        })
+      } catch (error) {
+        logInbound(config, { event: 'card', result: 'close-failed', sessionId, turn, reason: errorText(error) })
+      }
+    }
+    return
+  }
+
   // A turn that asked a question posted its question cards *below* the turn
   // card, so updating the turn card would land the answer above them and read as
   // silence. Post the answer as a fresh card underneath instead.
@@ -973,6 +1070,9 @@ export function observeSessionEvent(ctx, config, session, event) {
     // Remember the in-flight turn on disk: if the process dies now, the next
     // start can tell the chat which answer was lost.
     writeRuntimeMarker(config, { activeTurn: { sessionId: target, turn: data.turn, at: Date.now() } })
+    // In `native` mode the card is a progress display only; each step's answer
+    // becomes its own message. Decided once here so every later path reads one flag.
+    record.nativeAnswer = config?.answerMode === 'native'
     // Thinking process first (its create round trip overlaps the model's time to
     // first token), then the card placeholder.
     ensureCotRun(ctx, config, target, data.turn)
@@ -1034,6 +1134,13 @@ export function observeSessionEvent(ctx, config, session, event) {
     record.committed = record.committed ? `${record.committed}\n\n${text}` : text
     record.stepStream = ''
     record.stepBlocks = new Set()
+    // Each step is a self-contained piece of the answer. In `native` mode it goes out
+    // immediately as its own message — that is what makes a multi-step turn readable
+    // while it runs, instead of a single wall of text at the end.
+    if (record.nativeAnswer) {
+      void sendNativeAnswer(ctx, config, record, text).catch(() => {})
+      return
+    }
     scheduleCardFlush(record, ctx, config)
     return
   }
@@ -1663,6 +1770,24 @@ function applyPermissionPreset(ctx, config, target) {
     })
     return false
   }
+}
+
+/** Latest published version known for this package, refreshed at most once a day. */
+const versionState = { version: '', latest: '' }
+
+/** The running version, read from the package manifest this module ships with. */
+function runningVersion() {
+  try {
+    const raw = readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+    return String(JSON.parse(raw).version ?? '')
+  } catch {
+    return ''
+  }
+}
+
+/** Channel profile including the npm name, for the daily update check. */
+function profileFor(config) {
+  return channelProfile(config)
 }
 
 const normalizePath = (value) => String(value ?? '').trim().replace(/[\\/]+$/, '').toLowerCase()
@@ -2761,6 +2886,7 @@ export async function statusText(ctx, config, chatId) {
     `问答：${config.questionCards === false ? '关闭' : '开启'}${pendingQuestions.size > 0 ? `（等待回答 ${pendingQuestions.size}）` : ''}`,
     `审批：${config.approvalPrompts === false ? '关闭' : '开启'}${pendingApprovals.size > 0 ? `（等待批准 ${pendingApprovals.size}）` : ''}`,
     `提供方：${provider().id}`,
+    ...(updateNotice(versionState) ? [updateNotice(versionState)] : []),
     ...(siblingBindingWarning(config, sessionId) ? [siblingBindingWarning(config, sessionId)] : []),
   ].join('\n')
 }
@@ -4586,6 +4712,16 @@ export function apply(ctx, config = {}) {
   })
   const previousRun = readRuntimeMarker(config)
   const runtimeVersion = dshRuntimeVersion()
+  // Ask the registry once a day whether a newer version exists; `/status` is where it
+  // is reported. Fire and forget: a slow or offline registry must not delay startup.
+  versionState.version = runningVersion()
+  void refreshVersionCache({
+    name: profileFor(config).publishName,
+    version: versionState.version,
+    stateFile: versionCachePath(channelProfile(config).fileSlug),
+  }).then((info) => {
+    versionState.latest = String(info.latest ?? '')
+  }).catch(() => {})
   // Heartbeat: a run that stops updating this marker is a run that died — the
   // watchdog outside DSH reads exactly this to tell "plugin not loaded" from
   // "plugin idle", including after a DSH upgrade silently dropped it.
