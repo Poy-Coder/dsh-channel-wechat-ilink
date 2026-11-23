@@ -357,7 +357,10 @@ function cardJson(text, summary) {
         print_strategy: 'fast',
       },
       update_multi: true,
-      width_mode: 'fill',
+      // `fill` stretches the card to the chat edges, which leaves only the top
+      // corners rounded and makes the shape look cut off. The default width keeps
+      // the card inset so all four corners render as one rounded rectangle.
+      width_mode: 'default',
       summary: { content: summary },
     },
     body: {
