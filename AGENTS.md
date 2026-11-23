@@ -47,3 +47,11 @@ build running — the classic "I updated it and nothing changed".
   for `getupdates`; use one DSH per WeChat bot.
 - **`errcode -14` means back off.** The plugin pauses all requests for an hour
   rather than hammering the API; re-login with the QR script if it persists.
+
+## Releasing
+
+This bundle ships alongside `dsh-channel-feishu` from the same source tree, so it
+inherits the same release rules (see that package's AGENTS.md §10): never publish a
+tarball whose contents were not checked (`pack-check.ps1` runs before `npm publish`),
+and start every release note with `安全：` / `修复：` / `功能：` / `文档：` so the
+upgrade notice in `/status` says whether the update matters.

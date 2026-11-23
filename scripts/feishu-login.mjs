@@ -1,25 +1,27 @@
 /**
  * Feishu (Lark) app setup by scanning a QR code — no trip to the developer console.
  *
- * Two modes, one protocol (RFC 8628 device authorization against
+ * Three modes over one protocol (RFC 8628 device authorization against
  * `https://accounts.feishu.cn/oauth/v1/app/registration`):
  *
- *   node scripts/feishu-login.mjs          create a new app with every scope and event
- *                                          this channel needs, then save its credentials
- *   node scripts/feishu-login.mjs --fix    add the missing scopes/events to the app that
- *                                          is already configured (after an upgrade that
- *                                          needs a new permission)
- *   node scripts/feishu-login.mjs --status just show what is configured
+ *   node scripts/feishu-login.mjs          create a new app and wait for the scan
+ *   node scripts/feishu-login.mjs --fix    add missing scopes/events to the configured app
+ *   node scripts/feishu-login.mjs --begin  start a run, print the link and the QR image path,
+ *                                          then exit — how an agent hands the code to a person
+ *   node scripts/feishu-login.mjs --poll   check that run once; `--wait` keeps polling
+ *   node scripts/feishu-login.mjs --status show what is configured
  *
- * The `addons` parameter is what makes this "configure once": the scopes and events are
- * submitted with the registration, so the created app arrives with the permissions the
+ * The split matters: an agent cannot block a turn for the ten minutes a person needs to
+ * find their phone. It runs `--begin`, sends the image into the chat with its own file
+ * tool, and calls `--poll` after the person says they scanned.
+ *
+ * The `addons` parameter is what makes this "configure once": scopes and events are part
+ * of the registration request, so the created app arrives with the permissions this
  * plugin actually uses instead of the user clicking them one by one in the console.
- *
- * Scopes are derived from the endpoints this plugin calls — see REQUIRED_SCOPES below.
  */
 import { gzipSync } from 'node:zlib'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -39,6 +41,8 @@ const ensureUtf8Console = () => {
 ensureUtf8Console()
 
 const STATE_PATH = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'feishu-channel.json')
+/** Where an in-flight scan run is remembered, so `--begin` and `--poll` can be two calls. */
+const PENDING_PATH = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'feishu-login-pending.json')
 const ENDPOINT = '/oauth/v1/app/registration'
 const ORIGINS = {
   feishu: 'https://accounts.feishu.cn',
@@ -174,7 +178,109 @@ async function poll({ origin = ORIGINS.feishu, deviceCode }) {
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
 
-/** Drive begin → QR → poll until the phone confirms or the run ends. */
+/**
+ * `--begin`: start a run, hand back everything the caller needs to show a person, exit.
+ *
+ * Nothing here waits. The run is remembered on disk so `--poll` can pick it up in a
+ * later tool call — an agent must not hold a turn open while someone finds their phone.
+ */
+async function startRun({ mode }) {
+  const existing = readState()
+  const createOnly = mode === 'create'
+  const start = await begin({ createOnly, appId: createOnly ? undefined : existing?.appId })
+
+  const qrImage = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'feishu-login-qr.png')
+  let image = ''
+  try {
+    // renderQr returns `{ png, width }`; callers only need the path they can send.
+    const rendered = await renderQr(start.verifyUri, { out: qrImage })
+    image = typeof rendered === 'string' ? rendered : String(rendered?.png ?? '')
+  } catch { /* the link alone is enough */ }
+
+  const pending = {
+    mode,
+    deviceCode: start.deviceCode,
+    origin: ORIGINS.feishu,
+    verifyUri: start.verifyUri,
+    userCode: start.userCode,
+    expiresAt: Date.now() + start.expiresInMs,
+    intervalMs: start.intervalMs,
+    qrImage: image || '',
+    startedAt: Date.now(),
+  }
+  mkdirSync(dirname(PENDING_PATH), { recursive: true })
+  writeFileSync(PENDING_PATH, `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 })
+
+  return {
+    state: 'started',
+    mode,
+    // The agent sends these two to the chat: the link works by tapping, the image works by
+    // scanning from another screen. Both expire together.
+    url: start.verifyUri,
+    qrImage: image,
+    userCode: start.userCode,
+    expiresInMinutes: Math.round(start.expiresInMs / 60_000),
+    next: '给用户发 url（或 qrImage 图片），确认后运行 --poll',
+  }
+}
+
+/**
+ * `--poll`: check the remembered run once, or keep checking with `wait`.
+ * @param {{ wait?: boolean }} options
+ */
+async function pollRun({ wait = false } = {}) {
+  let pending
+  try {
+    pending = JSON.parse(readFileSync(PENDING_PATH, 'utf8'))
+  } catch {
+    return { state: 'none', hint: '没有进行中的扫码，先运行 --begin' }
+  }
+  if (!pending?.deviceCode) return { state: 'none', hint: '记录不完整，重新运行 --begin' }
+  if (Date.now() > Number(pending.expiresAt ?? 0)) {
+    removePending()
+    return { state: 'expired', hint: '二维码已过期，重新运行 --begin' }
+  }
+
+  let interval = Math.max(2_000, Number(pending.intervalMs ?? 5_000))
+  for (;;) {
+    const result = await poll({ origin: pending.origin ?? ORIGINS.feishu, deviceCode: pending.deviceCode })
+    if (result.origin) {
+      pending.origin = result.origin
+      try { writeFileSync(PENDING_PATH, `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 }) } catch { /* best effort */ }
+    }
+
+    if (result.state === 'success') {
+      const state = {
+        appId: result.appId,
+        appSecret: result.appSecret,
+        region: result.tenantBrand === 'lark' ? 'lark' : 'feishu',
+        ...(readState()?.defaultChatId ? { defaultChatId: readState().defaultChatId } : {}),
+      }
+      mkdirSync(dirname(STATE_PATH), { recursive: true })
+      writeFileSync(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+      removePending()
+      return {
+        state: 'success',
+        appId: state.appId,
+        region: state.region,
+        savedTo: STATE_PATH,
+        next: '在 profile 里打开 inboundEnabled，然后发一条飞书消息',
+      }
+    }
+    if (result.state === 'denied') { removePending(); return { state: 'denied', hint: '用户在手机端取消了授权' } }
+    if (result.state === 'expired') { removePending(); return { state: 'expired', hint: '二维码已过期，重新运行 --begin' } }
+    if (result.state === 'error') { return { state: 'error', detail: result.detail } }
+    if (result.state === 'slow_down') { interval += 5_000 }
+    if (!wait) return { state: 'pending', hint: '还没确认；用户扫码后再运行一次 --poll' }
+    if (Date.now() > Number(pending.expiresAt ?? 0)) { removePending(); return { state: 'expired', hint: '二维码已过期' } }
+    await sleep(interval)
+  }
+}
+
+/** Drop the in-flight marker; a finished or abandoned run must not look active. */
+function removePending() {
+  try { unlinkSync(PENDING_PATH) } catch { /* already gone */ }
+}
 async function scan({ mode }) {
   const existing = readState()
   const createOnly = mode === 'create'
@@ -239,12 +345,33 @@ const status = () => {
 
 const main = async () => {
   const args = process.argv.slice(2)
+
+  // --- agent-facing split: start a run, then check it later -----------------
+  if (args.includes('--begin')) {
+    const started = await startRun({ mode: args.includes('--fix') ? 'fix' : 'create' })
+    log(JSON.stringify(started, null, 2))
+    return
+  }
+  if (args.includes('--poll')) {
+    const outcome = await pollRun({ wait: args.includes('--wait') })
+    log(JSON.stringify(outcome, null, 2))
+    // 0 = done, 2 = still waiting (not an error), 1 = failed
+    if (outcome.state === 'success') return
+    if (outcome.state === 'pending') { process.exitCode = 2; return }
+    process.exitCode = 1
+    return
+  }
+
   if (args.includes('--status')) { status(); return }
   if (args.includes('--help') || args.includes('-h')) {
     log('用法：')
-    log('  node scripts/feishu-login.mjs           扫码创建应用（自动带上所需权限与事件）')
+    log('  node scripts/feishu-login.mjs           扫码创建应用（等待确认，人在终端前用）')
     log('  node scripts/feishu-login.mjs --fix     给已配置的应用补齐缺失权限')
+    log('  node scripts/feishu-login.mjs --begin   只发起：打印链接、配对码、二维码图片路径后退出')
+    log('  node scripts/feishu-login.mjs --poll    检查 --begin 发起的那次（--wait 持续等待）')
     log('  node scripts/feishu-login.mjs --status  查看已保存的凭据')
+    log('')
+    log('Agent 用法：--begin → 把 url 和 qrImage 发到聊天里 → 用户扫码后 --poll')
     return
   }
   if (args.includes('--fix')) {
