@@ -648,8 +648,15 @@ const isSequenceConflict = (error) => /300317|sequence number compare failed/i.t
 /** A one-off network blip that is worth one retry before losing the card. */
 const isTransientNetworkError = (error) => /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|network error/i.test(String(error?.message ?? error))
 
-/** Feishu closes a streaming card after a while; further element writes get 300309. */
-const isStreamingClosed = (error) => /300309|streaming mode is closed/i.test(String(error?.message ?? error))
+/**
+ * Feishu closes a streaming card after a while; further element writes get 300309.
+ *
+ * `200850 card streaming timeout` is the same event seen from the other side: the card
+ * stopped accepting streaming writes. It must be classified here too, otherwise the
+ * first timeout takes the "give up" branch, sets `cardFailed`, and the recovery path
+ * below can never run — which is exactly what a 19-minute turn hit on 2026-11-24.
+ */
+const isStreamingClosed = (error) => /300309|200850|streaming mode is closed|card streaming timeout/i.test(String(error?.message ?? error))
 
 /**
  * Serialize every write to one card.
@@ -733,12 +740,15 @@ async function flushCard(record, ctx, config) {
       logInbound(config, {
         event: 'card', result: 'rate-limited', sessionId: record.sessionId, turn: record.turn, sequence: card.sequence,
       })
-    } else if (isStreamingClosed(error) && (record.recreations ?? 0) < 3) {
-      // Feishu closes a streaming card after roughly ten minutes; a long turn
+    } else if (isStreamingClosed(error) && (record.recreations ?? 0) < 6) {
+      // Feishu closes a streaming card after roughly ten to twenty minutes; a long turn
       // then loses its card. Start a fresh one and keep writing there instead of
-      // degrading to a plain-text message (which would print raw markdown).
+      // degrading to a plain-text message (which would print raw markdown). Six
+      // recreations cover roughly two hours; `cardFailed` must be cleared or `ensureCard`
+      // refuses to build the replacement.
       record.recreations = (record.recreations ?? 0) + 1
       record.card = undefined
+      record.cardFailed = false
       record.lastCardText = ''
       record.backoffUntil = Date.now() + 1_000
       logInbound(config, {
