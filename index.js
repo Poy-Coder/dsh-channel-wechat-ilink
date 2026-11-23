@@ -80,6 +80,8 @@ export const Config = z.object({
   idleReleaseMinutes: z.number().default(30).description('Minutes of quiet before the plugin hands its agent back; 0 keeps it alive.'),
   notifyOnNew: z.boolean().default(true).description('Reply on the IM when /new creates a session.'),
   streamingCards: z.boolean().default(true).description('Stream answers into a card; off sends plain text.'),
+  reconcile: z.boolean().default(true)
+    .description('Catch-up poll: pull recent history on a timer to notice a socket that answers pings but delivers nothing. Turn it off to spend no quota at all — a silently deaf socket then goes unnoticed until someone reports it.'),
   answerMode: z.union([z.const('card'), z.const('native')]).default('card')
     .description('card: the answer lives in the streaming card (default). native: the card shows only progress, and each step\'s answer goes out as a native rich-text message — copyable, searchable, forwardable, and never split mid-answer.'),
   textProgressSeconds: z.number().default(30)
@@ -1875,6 +1877,20 @@ const RECONCILE_ACTIVE_IDLE_MS = 10 * 60_000
 const RECONCILE_WARM_IDLE_MS = 60 * 60_000
 
 /**
+ * Whether the catch-up poll runs at all.
+ *
+ * The poll is the only timed spender of base-API calls, so turning it off is how a
+ * free/standard tenant can run at zero history-pull cost — at the price of not noticing
+ * a socket that answers pings but delivers nothing (issue #6).
+ *
+ * @param {object} config
+ * @returns {boolean}
+ */
+export function reconcileEnabled(config = {}) {
+  return config?.reconcile !== false
+}
+
+/**
  * How long to wait before the next catch-up poll.
  *
  * The poll exists to notice a socket that answers pings but delivers nothing, and it
@@ -2923,7 +2939,9 @@ export async function statusText(ctx, config, chatId) {
     `审批：${config.approvalPrompts === false ? '关闭' : '开启'}${pendingApprovals.size > 0 ? `（等待批准 ${pendingApprovals.size}）` : ''}`,
     `提供方：${provider().id}`,
     ...(updateNotice(versionState) ? [updateNotice(versionState)] : []),
-    `补拉：今日 ${reconcileState.count} 次 · 当前间隔 ${Math.round(Number(reconcileState.delay ?? 0) / 60_000) || 0} 分钟`,
+    `补拉：${config.reconcile === false
+      ? '已关闭（只靠长连接，不消耗 API 配额）'
+      : `今日 ${reconcileState.count} 次 · 当前间隔 ${Math.round(Number(reconcileState.delay ?? 0) / 60_000) || 0} 分钟`}`,
     ...(siblingBindingWarning(config, sessionId) ? [siblingBindingWarning(config, sessionId)] : []),
   ].join('\n')
 }
@@ -4608,6 +4626,10 @@ function startInbound(ctx, config) {
       // cold a 30-minute probe is enough to notice a deaf socket.
       const scheduleReconcile = (delay = 5_000) => {
         if (reconcileTimer || disposed) return
+        // `reconcile: false` removes the timer entirely: the socket is trusted and no
+        // history pull is spent. The reconnect path calls this too, so the check lives
+        // here rather than at one call site.
+        if (!reconcileEnabled(config)) return
         reconcileState.delay = delay
         reconcileTimer = setTimeout(() => {
           reconcileTimer = undefined
